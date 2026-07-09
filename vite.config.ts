@@ -5,6 +5,8 @@ import { VitePWA } from 'vite-plugin-pwa';
 // Base path : pour GitHub Pages (servi sous /<repo>/), définir
 // VITE_BASE_PATH=/nom-du-repo. Vide par défaut (déploiement racine).
 const base = process.env.VITE_BASE_PATH ?? '/';
+// Garantit un slash final pour préfixer les chemins du manifest.
+const baseDir = base.endsWith('/') ? base : `${base}/`;
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -60,25 +62,26 @@ export default defineConfig({
         background_color: '#0f172a',
         display: 'standalone',
         orientation: 'portrait',
-        start_url: '/',
-        scope: '/',
+        // Chemins relatifs à la base pour fonctionner sous /<repo>/ (GitHub Pages).
+        start_url: baseDir,
+        scope: baseDir,
         lang: 'fr',
         categories: ['finance', 'productivity'],
         icons: [
           {
-            src: '/icons/icon-192.png',
+            src: `${baseDir}icons/icon-192.png`,
             sizes: '192x192',
             type: 'image/png',
             purpose: 'any',
           },
           {
-            src: '/icons/icon-512.png',
+            src: `${baseDir}icons/icon-512.png`,
             sizes: '512x512',
             type: 'image/png',
             purpose: 'any',
           },
           {
-            src: '/icons/icon-maskable-512.png',
+            src: `${baseDir}icons/icon-maskable-512.png`,
             sizes: '512x512',
             type: 'image/png',
             purpose: 'maskable',

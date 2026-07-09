@@ -1,249 +1,384 @@
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
-import type { Budget, Category, Expense, MerchantCategory } from '../types'
-import { DEFAULT_CATEGORIES } from './categories'
+// ===========================================================================
+// Couche d'accès IndexedDB (offline-first, zéro réseau).
+// Bibliothèque : idb (wrapper léger Promise-based).
+//
+// Object stores (magasins) :
+//   - transactions     : dépenses (keyPath "id", index sur date + categoryId)
+//   - categories       : catégories (keyPath "id", index sur order)
+//   - merchantRules    : apprentissage marchand->catégorie (keyPath "merchant")
+//   - budgets          : budgets mensuels (keyPath "id", index sur categoryId)
+//   - settings         : paramètres key-value (keyPath "key")
+// ===========================================================================
 
-/**
- * Schéma de la base IndexedDB locale.
- * 4 object stores : expenses, categories, budgets, merchantCategories.
- */
+import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import type {
+  Budget,
+  Category,
+  MerchantRule,
+  Setting,
+  SettingKey,
+  Transaction,
+} from '@/types';
+
+// ---------------------------------------------------------------------------
+// Constantes & version
+// ---------------------------------------------------------------------------
+
+const DB_NAME = 'mes-depenses';
+const DB_VERSION = 1;
+const STORE_TX = 'transactions';
+const STORE_CAT = 'categories';
+const STORE_RULES = 'merchantRules';
+const STORE_BUDGET = 'budgets';
+const STORE_SETTINGS = 'settings';
+
+/** Version logique du schéma d'export (incrémenter à chaque rupture). */
+export const BACKUP_SCHEMA_VERSION = 1;
+
+// ---------------------------------------------------------------------------
+// Définition du schéma typé (DBSchema de idb)
+// ---------------------------------------------------------------------------
+
 interface DepensesDB extends DBSchema {
-  expenses: {
-    key: string
-    value: Expense
-    indexes: { 'by-date': string; 'by-category': string }
-  }
-  categories: {
-    key: string
-    value: Category
-  }
-  budgets: {
-    key: string
-    value: Budget
-    indexes: { 'by-type': string }
-  }
-  merchantCategories: {
-    key: string
-    value: MerchantCategory
-  }
+  [STORE_TX]: {
+    key: string;
+    value: Transaction;
+    indexes: {
+      'by-date': string; // index sur date (tri rapide par période)
+      'by-category': string; // index sur categoryId (filtre)
+    };
+  };
+  [STORE_CAT]: {
+    key: string;
+    value: Category;
+    indexes: { 'by-order': number };
+  };
+  [STORE_RULES]: {
+    key: string; // = merchant normalisé
+    value: MerchantRule;
+  };
+  [STORE_BUDGET]: {
+    key: string;
+    value: Budget;
+    indexes: { 'by-category': string };
+  };
+  [STORE_SETTINGS]: {
+    key: SettingKey;
+    value: Setting;
+  };
 }
 
-const DB_NAME = 'depenses-db'
-const DB_VERSION = 1
+// ---------------------------------------------------------------------------
+// Singleton de la connexion
+// ---------------------------------------------------------------------------
 
-let dbPromise: Promise<IDBPDatabase<DepensesDB>> | null = null
+let dbPromise: Promise<IDBPDatabase<DepensesDB>> | null = null;
 
-/** Ouvre (et crée à la première fois) la base de données. */
 function getDB(): Promise<IDBPDatabase<DepensesDB>> {
   if (!dbPromise) {
     dbPromise = openDB<DepensesDB>(DB_NAME, DB_VERSION, {
-      async upgrade(db) {
-        // expenses
-        if (!db.objectStoreNames.contains('expenses')) {
-          const expenses = db.createObjectStore('expenses', { keyPath: 'id' })
-          expenses.createIndex('by-date', 'date')
-          expenses.createIndex('by-category', 'categoryId')
+      upgrade(db) {
+        // transactions
+        if (!db.objectStoreNames.contains(STORE_TX)) {
+          const txStore = db.createObjectStore(STORE_TX, { keyPath: 'id' });
+          txStore.createIndex('by-date', 'date');
+          txStore.createIndex('by-category', 'categoryId');
         }
         // categories
-        if (!db.objectStoreNames.contains('categories')) {
-          db.createObjectStore('categories', { keyPath: 'id' })
+        if (!db.objectStoreNames.contains(STORE_CAT)) {
+          const catStore = db.createObjectStore(STORE_CAT, { keyPath: 'id' });
+          catStore.createIndex('by-order', 'order');
+        }
+        // merchantRules (key = merchant normalisé)
+        if (!db.objectStoreNames.contains(STORE_RULES)) {
+          db.createObjectStore(STORE_RULES, { keyPath: 'merchant' });
         }
         // budgets
-        if (!db.objectStoreNames.contains('budgets')) {
-          const budgets = db.createObjectStore('budgets', { keyPath: 'id' })
-          budgets.createIndex('by-type', 'type')
+        if (!db.objectStoreNames.contains(STORE_BUDGET)) {
+          const budStore = db.createObjectStore(STORE_BUDGET, {
+            keyPath: 'id',
+          });
+          budStore.createIndex('by-category', 'categoryId');
         }
-        // merchantCategories (apprentissage)
-        if (!db.objectStoreNames.contains('merchantCategories')) {
-          db.createObjectStore('merchantCategories', { keyPath: 'merchant' })
+        // settings (key-value)
+        if (!db.objectStoreNames.contains(STORE_SETTINGS)) {
+          db.createObjectStore(STORE_SETTINGS, { keyPath: 'key' });
         }
       },
-      async terminated() {
-        dbPromise = null
+      blocked() {
+        console.warn(
+          '[db] IndexedDB upgrade bloqué : fermez les autres onglets de l\'app.',
+        );
       },
-    })
+      terminated() {
+        console.warn('[db] Connexion IndexedDB terminée inopinément.');
+        dbPromise = null;
+      },
+    });
   }
-  return dbPromise
+  return dbPromise;
 }
 
-/** Initialise les catégories par défaut si la base est vide. */
-export async function seedDefaults(): Promise<void> {
-  const db = await getDB()
-  const count = await db.count('categories')
-  if (count === 0) {
-    const tx = db.transaction('categories', 'readwrite')
-    await Promise.all(DEFAULT_CATEGORIES.map((c) => tx.store.put(c)))
-    await tx.done
-  }
+// ---------------------------------------------------------------------------
+// Génération d'IDs : triable chronologiquement et unique.
+// Format : base36(Date.now()) + base36(counter) + random → ~16 chars.
+// ---------------------------------------------------------------------------
+
+let idCounter = 0;
+export function generateId(): string {
+  idCounter = (idCounter + 1) % 1_000_000;
+  const time = Date.now().toString(36);
+  const counter = idCounter.toString(36).padStart(3, '0');
+  const rand = Math.floor(Math.random() * 46656) // 36^3
+    .toString(36)
+    .padStart(3, '0');
+  return `${time}${counter}${rand}`;
 }
 
-// ----------------------------------------------------------------------------
-// EXPENSES
-// ----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// SEED : catégories par défaut (au premier lancement)
+// ---------------------------------------------------------------------------
 
-export async function getAllExpenses(): Promise<Expense[]> {
-  const db = await getDB()
-  const all = await db.getAllFromIndex('expenses', 'by-date')
-  // Index trié ascendant ; on veut du plus récent au plus ancien.
-  return all.reverse()
-}
+/** Les 9 catégories imposées par le cahier des charges. */
+export const DEFAULT_CATEGORIES: Category[] = [
+  { label: 'Alimentation', icon: 'ShoppingCart', color: '#22c55e', order: 1 },
+  { label: 'Transport', icon: 'Bus', color: '#3b82f6', order: 2 },
+  { label: 'Logement', icon: 'Home', color: '#a855f7', order: 3 },
+  { label: 'Loisirs', icon: 'Gamepad2', color: '#ec4899', order: 4 },
+  { label: 'Santé', icon: 'HeartPulse', color: '#ef4444', order: 5 },
+  { label: 'Shopping', icon: 'ShoppingBag', color: '#f59e0b', order: 6 },
+  { label: 'Abonnements', icon: 'Repeat', color: '#14b8a6', order: 7 },
+  { label: 'Restaurants', icon: 'UtensilsCrossed', color: '#f97316', order: 8 },
+  { label: 'Autre', icon: 'Circle', color: '#64748b', order: 9 },
+].map((c) => ({
+  ...c,
+  id: `default-${c.order}`,
+  isDefault: true,
+  createdAt: 0,
+}));
 
-export async function getExpense(id: string): Promise<Expense | undefined> {
-  const db = await getDB()
-  return db.get('expenses', id)
-}
+async function seedIfEmpty(): Promise<void> {
+  const db = await getDB();
+  const count = await db.count(STORE_CAT);
+  if (count > 0) return;
 
-export async function saveExpense(expense: Expense): Promise<void> {
-  const db = await getDB()
-  await db.put('expenses', expense)
-}
-
-export async function deleteExpense(id: string): Promise<void> {
-  const db = await getDB()
-  await db.delete('expenses', id)
-}
-
-export async function deleteAllExpenses(): Promise<void> {
-  const db = await getDB()
-  await db.clear('expenses')
-}
-
-// ----------------------------------------------------------------------------
-// CATEGORIES
-// ----------------------------------------------------------------------------
-
-export async function getAllCategories(): Promise<Category[]> {
-  const db = await getDB()
-  const all = await db.getAll('categories')
-  return all.sort((a, b) => a.order - b.order)
-}
-
-export async function saveCategory(category: Category): Promise<void> {
-  const db = await getDB()
-  await db.put('categories', category)
-}
-
-export async function deleteCategory(id: string): Promise<void> {
-  const db = await getDB()
-  await db.delete('categories', id)
-}
-
-// ----------------------------------------------------------------------------
-// BUDGETS
-// ----------------------------------------------------------------------------
-
-export async function getAllBudgets(): Promise<Budget[]> {
-  const db = await getDB()
-  return db.getAll('budgets')
-}
-
-export async function saveBudget(budget: Budget): Promise<void> {
-  const db = await getDB()
-  await db.put('budgets', budget)
-}
-
-export async function deleteBudget(id: string): Promise<void> {
-  const db = await getDB()
-  await db.delete('budgets', id)
-}
-
-// ----------------------------------------------------------------------------
-// MERCHANT CATEGORIES (apprentissage local)
-// ----------------------------------------------------------------------------
-
-/** Renvoie l'apprentissage sous forme de map { marchandNormalisé: categoryId }. */
-export async function getLearnedMerchants(): Promise<Record<string, string>> {
-  const db = await getDB()
-  const all = await db.getAll('merchantCategories')
-  const map: Record<string, string> = {}
-  for (const m of all) map[m.merchant] = m.categoryId
-  return map
+  const tx = db.transaction(STORE_CAT, 'readwrite');
+  await Promise.all(DEFAULT_CATEGORIES.map((c) => tx.store.put(c)));
+  await tx.done;
 }
 
 /**
- * Enregistre (ou renforce) l'association marchand -> catégorie.
- * Utilisé après validation d'une dépense ou correction manuelle.
+ * Initialise la base : ouvre la connexion + sème les catégories par défaut.
+ * À appeler une seule fois au démarrage de l'app (dans main.tsx ou App).
  */
-export async function learnMerchant(
-  merchant: string,
-  categoryId: string,
+export async function initDB(): Promise<void> {
+  await getDB();
+  await seedIfEmpty();
+}
+
+// ===========================================================================
+// TRANSACTIONS (dépenses)
+// ===========================================================================
+
+export async function getAllTransactions(): Promise<Transaction[]> {
+  const db = await getDB();
+  // Index by-date → tri décroissant (plus récent d'abord).
+  const all = await db.getAllFromIndex(STORE_TX, 'by-date');
+  return all.sort((a, b) => b.date.localeCompare(a.date));
+}
+
+export async function getTransaction(id: string): Promise<Transaction | undefined> {
+  const db = await getDB();
+  return db.get(STORE_TX, id);
+}
+
+export async function putTransaction(tx: Transaction): Promise<void> {
+  const db = await getDB();
+  await db.put(STORE_TX, tx);
+}
+
+export async function deleteTransaction(id: string): Promise<void> {
+  const db = await getDB();
+  await db.delete(STORE_TX, id);
+}
+
+export async function bulkPutTransactions(items: Transaction[]): Promise<void> {
+  if (items.length === 0) return;
+  const db = await getDB();
+  const tx = db.transaction(STORE_TX, 'readwrite');
+  await Promise.all(items.map((t) => tx.store.put(t)));
+  await tx.done;
+}
+
+// ===========================================================================
+// CATEGORIES
+// ===========================================================================
+
+export async function getAllCategories(): Promise<Category[]> {
+  const db = await getDB();
+  const all = await db.getAllFromIndex(STORE_CAT, 'by-order');
+  return all.sort((a, b) => a.order - b.order);
+}
+
+export async function putCategory(cat: Category): Promise<void> {
+  const db = await getDB();
+  await db.put(STORE_CAT, cat);
+}
+
+export async function deleteCategory(id: string): Promise<void> {
+  const db = await getDB();
+  await db.delete(STORE_CAT, id);
+}
+
+// ===========================================================================
+// MERCHANT RULES (apprentissage local)
+// ===========================================================================
+
+export async function getAllMerchantRules(): Promise<MerchantRule[]> {
+  const db = await getDB();
+  return db.getAll(STORE_RULES);
+}
+
+export async function putMerchantRule(rule: MerchantRule): Promise<void> {
+  const db = await getDB();
+  await db.put(STORE_RULES, rule);
+}
+
+export async function deleteMerchantRule(merchant: string): Promise<void> {
+  const db = await getDB();
+  await db.delete(STORE_RULES, merchant);
+}
+
+// ===========================================================================
+// BUDGETS
+// ===========================================================================
+
+export async function getAllBudgets(): Promise<Budget[]> {
+  const db = await getDB();
+  return db.getAll(STORE_BUDGET);
+}
+
+export async function putBudget(budget: Budget): Promise<void> {
+  const db = await getDB();
+  await db.put(STORE_BUDGET, budget);
+}
+
+export async function deleteBudget(id: string): Promise<void> {
+  const db = await getDB();
+  await db.delete(STORE_BUDGET, id);
+}
+
+// ===========================================================================
+// SETTINGS (key-value)
+// ===========================================================================
+
+export async function getSetting<K extends SettingKey>(
+  key: K,
+): Promise<Setting<K>['value'] | undefined> {
+  const db = await getDB();
+  const row = await db.get(STORE_SETTINGS, key);
+  return row?.value as Setting<K>['value'] | undefined;
+}
+
+export async function setSetting<K extends SettingKey>(
+  key: K,
+  value: Setting<K>['value'],
 ): Promise<void> {
-  const db = await getDB()
-  const existing = await db.get('merchantCategories', merchant)
-  await db.put('merchantCategories', {
-    merchant,
-    categoryId,
-    count: (existing?.count ?? 0) + 1,
-    updatedAt: Date.now(),
-  })
+  const db = await getDB();
+  const row: Setting<K> = { key, value, updatedAt: Date.now() };
+  await db.put(STORE_SETTINGS, row);
 }
 
-export async function deleteLearnedMerchant(merchant: string): Promise<void> {
-  const db = await getDB()
-  await db.delete('merchantCategories', merchant)
+export async function getAllSettings(): Promise<Setting[]> {
+  const db = await getDB();
+  return db.getAll(STORE_SETTINGS);
 }
 
-// ----------------------------------------------------------------------------
-// IMPORT / EXPORT (sauvegarde JSON complète)
-// ----------------------------------------------------------------------------
+// ===========================================================================
+// EXPORT / IMPORT (sauvegarde JSON complète)
+// ===========================================================================
 
-export async function exportAll(): Promise<{
-  expenses: Expense[]
-  categories: Category[]
-  budgets: Budget[]
-  merchantCategories: MerchantCategory[]
-}> {
-  const db = await getDB()
-  const [expenses, categories, budgets, merchantCategories] = await Promise.all([
-    db.getAll('expenses'),
-    db.getAll('categories'),
-    db.getAll('budgets'),
-    db.getAll('merchantCategories'),
-  ])
-  return { expenses, categories, budgets, merchantCategories }
+import type { BackupPayload } from '@/types';
+
+/** Exporte TOUT le contenu de la base en un objet sérialisable. */
+export async function exportDB(): Promise<BackupPayload> {
+  const db = await getDB();
+  const [transactions, categories, merchantRules, budgets, settings] =
+    await Promise.all([
+      db.getAll(STORE_TX),
+      db.getAll(STORE_CAT),
+      db.getAll(STORE_RULES),
+      db.getAll(STORE_BUDGET),
+      db.getAll(STORE_SETTINGS),
+    ]);
+
+  return {
+    app: 'mes-depenses',
+    version: BACKUP_SCHEMA_VERSION,
+    exportedAt: new Date().toISOString(),
+    transactions,
+    categories,
+    merchantRules,
+    budgets,
+    settings,
+  };
 }
 
-/** Réinitialise toutes les données et importe le contenu d'une sauvegarde. */
-export async function importAll(data: {
-  expenses?: Expense[]
-  categories?: Category[]
-  budgets?: Budget[]
-  merchantCategories?: MerchantCategory[]
-}): Promise<void> {
-  const db = await getDB()
+/**
+ * Importe une sauvegarde JSON.
+ * @param merge true (défaut) : conserve les données existantes, écrase les
+ *                  doublons par même id/merchant. Les nouvelles sont ajoutées.
+ * @param merge false : efface puis remplace (destructif).
+ */
+export async function importDB(
+  payload: BackupPayload,
+  merge = true,
+): Promise<void> {
+  const db = await getDB();
+
+  const stores = [
+    STORE_TX,
+    STORE_CAT,
+    STORE_RULES,
+    STORE_BUDGET,
+    STORE_SETTINGS,
+  ] as const;
+
+  const tx = db.transaction([...stores], 'readwrite');
+
+  if (!merge) {
+    await Promise.all(stores.map((s) => tx.objectStore(s).clear()));
+  }
+
+  // Put gère l'upsert : même keyPath → remplacement, sinon ajout.
+  await Promise.all([
+    ...payload.transactions.map((t) => tx.objectStore(STORE_TX).put(t)),
+    ...payload.categories.map((c) => tx.objectStore(STORE_CAT).put(c)),
+    ...payload.merchantRules.map((r) => tx.objectStore(STORE_RULES).put(r)),
+    ...payload.budgets.map((b) => tx.objectStore(STORE_BUDGET).put(b)),
+    ...payload.settings.map((s) => tx.objectStore(STORE_SETTINGS).put(s)),
+  ]);
+
+  await tx.done;
+}
+
+// ---------------------------------------------------------------------------
+// Utilitaire de réinitialisation complète (débogage / Settings).
+// ---------------------------------------------------------------------------
+
+export async function clearAllData(): Promise<void> {
+  const db = await getDB();
   const tx = db.transaction(
-    ['expenses', 'categories', 'budgets', 'merchantCategories'],
+    [STORE_TX, STORE_CAT, STORE_RULES, STORE_BUDGET, STORE_SETTINGS],
     'readwrite',
-  )
+  );
   await Promise.all([
-    tx.objectStore('expenses').clear(),
-    tx.objectStore('categories').clear(),
-    tx.objectStore('budgets').clear(),
-    tx.objectStore('merchantCategories').clear(),
-  ])
-  await Promise.all([
-    ...(data.expenses ?? []).map((e) => tx.objectStore('expenses').put(e)),
-    ...(data.categories ?? []).map((c) => tx.objectStore('categories').put(c)),
-    ...(data.budgets ?? []).map((b) => tx.objectStore('budgets').put(b)),
-    ...(data.merchantCategories ?? []).map((m) =>
-      tx.objectStore('merchantCategories').put(m),
-    ),
-  ])
-  await tx.done
-}
-
-/** Efface absolument toutes les données (reset usine). */
-export async function wipeAllData(): Promise<void> {
-  const db = await getDB()
-  const tx = db.transaction(
-    ['expenses', 'categories', 'budgets', 'merchantCategories'],
-    'readwrite',
-  )
-  await Promise.all([
-    tx.objectStore('expenses').clear(),
-    tx.objectStore('categories').clear(),
-    tx.objectStore('budgets').clear(),
-    tx.objectStore('merchantCategories').clear(),
-  ])
-  await tx.done
-  await seedDefaults()
+    tx.objectStore(STORE_TX).clear(),
+    tx.objectStore(STORE_CAT).clear(),
+    tx.objectStore(STORE_RULES).clear(),
+    tx.objectStore(STORE_BUDGET).clear(),
+    tx.objectStore(STORE_SETTINGS).clear(),
+  ]);
+  await tx.done;
+  await seedIfEmpty();
 }

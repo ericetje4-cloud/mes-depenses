@@ -1,76 +1,153 @@
-import type { ReactNode } from 'react'
-import { BarChart3, Plus, History, PiggyBank, Settings } from 'lucide-react'
-import type { Page } from '../hooks/useNavigation'
+// ===========================================================================
+// Layout applicatif : en-tête, navigation (bottom-bar mobile), indicateur
+// offline, notification de mise à jour PWA.
+// ===========================================================================
 
-const TABS: { id: Page; label: string; icon: typeof BarChart3 }[] = [
-  { id: 'dashboard', label: 'Tableau', icon: BarChart3 },
-  { id: 'history', label: 'Historique', icon: History },
-  { id: 'budgets', label: 'Budgets', icon: PiggyBank },
-  { id: 'settings', label: 'Réglages', icon: Settings },
-]
+import { type ReactNode } from 'react';
+import {
+  LayoutDashboard,
+  Plus,
+  History,
+  PiggyBank,
+  Settings,
+  RefreshCw,
+  WifiOff,
+} from 'lucide-react';
+import { Icon } from './Icon';
+import { useNavigation, type Route } from '@/hooks/useNavigation';
+import { useTheme } from '@/hooks/useTheme';
+import { applyUpdate, subscribePWA, getPWAState } from '@/lib/pwa';
+import { useSyncExternalStore } from 'react';
+
+const NAV_ITEMS: { route: Route; label: string; icon: typeof Plus }[] = [
+  { route: 'dashboard', label: 'Accueil', icon: LayoutDashboard },
+  { route: 'add', label: 'Ajouter', icon: Plus },
+  { route: 'history', label: 'Historique', icon: History },
+  { route: 'budgets', label: 'Budgets', icon: PiggyBank },
+  { route: 'settings', label: 'Réglages', icon: Settings },
+];
 
 export function Layout({
-  page,
-  onNavigate,
-  onAdd,
   children,
+  title,
+  actions,
 }: {
-  page: Page
-  onNavigate: (p: Page) => void
-  onAdd: () => void
-  children: ReactNode
+  children: ReactNode;
+  title: string;
+  actions?: ReactNode;
 }) {
+  const { route, navigate } = useNavigation();
+  const { resolved, toggle } = useTheme();
+
+  // État PWA via subscribePWA + useSyncExternalStore.
+  const pwaState = useSyncExternalStore(
+    subscribePWAReact,
+    getPWAStateReact,
+    getPWAStateReact,
+  );
+
   return (
-    <div className="mx-auto flex min-h-full max-w-2xl flex-col bg-slate-50 dark:bg-slate-950">
-      {/* Contenu */}
-      <main className="flex-1 px-4 pb-28 pt-5 sm:px-6">{children}</main>
+    <div className="min-h-screen pb-20 sm:pb-0">
+      {/* En-tête */}
+      <header className="sticky top-0 z-30 border-b border-slate-200/70 bg-white/80 backdrop-blur-lg dark:border-slate-800 dark:bg-slate-900/80">
+        <div className="mx-auto flex max-w-3xl items-center gap-3 px-4 py-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand-600 text-white">
+              <Icon name="Wallet" size={18} />
+            </div>
+            <h1 className="truncate text-lg font-bold">{title}</h1>
+          </div>
 
-      {/* Barre de navigation flottante */}
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/90 backdrop-blur-lg dark:border-slate-800 dark:bg-slate-900/90">
-        <div className="mx-auto flex max-w-2xl items-stretch justify-around px-2 pb-[env(safe-area-inset-bottom)]">
-          {TABS.slice(0, 2).map((t) => (
-            <NavButton key={t.id} tab={t} active={page === t.id} onClick={() => onNavigate(t.id)} />
-          ))}
+          <div className="flex items-center gap-1">
+            {actions}
+            <button
+              onClick={toggle}
+              className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+              aria-label="Basculer le thème"
+              title="Thème : clair / sombre"
+            >
+              <Icon name={resolved === 'dark' ? 'Sun' : 'Moon'} size={18} />
+            </button>
+          </div>
+        </div>
+      </header>
 
-          {/* Bouton central d'ajout */}
+      {/* Indicateur offline */}
+      {pwaState.isOffline && (
+        <div className="mx-auto flex max-w-3xl items-center gap-2 bg-amber-50 px-4 py-2 text-sm text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+          <WifiOff size={15} /> Mode hors-ligne — vos données restent accessibles.
+        </div>
+      )}
+
+      {/* Notification de mise à jour PWA */}
+      {pwaState.needRefresh && (
+        <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 bg-brand-600 px-4 py-2.5 text-sm text-white">
+          <span className="flex items-center gap-2">
+            <RefreshCw size={15} /> Une mise à jour est disponible.
+          </span>
           <button
-            onClick={onAdd}
-            aria-label="Ajouter une dépense"
-            className="-mt-5 flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 transition hover:bg-indigo-700 active:scale-95"
+            onClick={() => applyUpdate()}
+            className="rounded-lg bg-white/20 px-3 py-1 font-medium hover:bg-white/30"
           >
-            <Plus size={26} />
+            Mettre à jour
           </button>
+        </div>
+      )}
 
-          {TABS.slice(2).map((t) => (
-            <NavButton key={t.id} tab={t} active={page === t.id} onClick={() => onNavigate(t.id)} />
-          ))}
+      {/* Contenu */}
+      <main className="mx-auto max-w-3xl px-4 py-5">{children}</main>
+
+      {/* Bottom navigation (mobile) */}
+      <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-200 bg-white/90 backdrop-blur-lg dark:border-slate-800 dark:bg-slate-900/90 sm:hidden">
+        <div className="mx-auto flex max-w-md items-stretch justify-around">
+          {NAV_ITEMS.map((item) => {
+            const active = route === item.route;
+            const isAdd = item.route === 'add';
+            if (isAdd) {
+              return (
+                <button
+                  key={item.route}
+                  onClick={() => navigate('add')}
+                  className="flex flex-1 flex-col items-center justify-center gap-0.5 py-2"
+                >
+                  <span className="-mt-5 flex h-12 w-12 items-center justify-center rounded-full bg-brand-600 text-white shadow-lg shadow-brand-600/30">
+                    <Plus size={24} />
+                  </span>
+                  <span className="text-[10px] font-medium text-brand-600">
+                    {item.label}
+                  </span>
+                </button>
+              );
+            }
+            return (
+              <button
+                key={item.route}
+                onClick={() => navigate(item.route)}
+                className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-2.5 transition-colors ${
+                  active
+                    ? 'text-brand-600 dark:text-brand-400'
+                    : 'text-slate-400'
+                }`}
+              >
+                <item.icon size={20} />
+                <span className="text-[10px] font-medium">{item.label}</span>
+              </button>
+            );
+          })}
         </div>
       </nav>
     </div>
-  )
+  );
 }
 
-function NavButton({
-  tab,
-  active,
-  onClick,
-}: {
-  tab: { id: Page; label: string; icon: typeof BarChart3 }
-  active: boolean
-  onClick: () => void
-}) {
-  const Icon = tab.icon
-  return (
-    <button
-      onClick={onClick}
-      className={`flex flex-1 flex-col items-center gap-1 py-2.5 text-[11px] font-medium transition ${
-        active
-          ? 'text-indigo-600 dark:text-indigo-400'
-          : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'
-      }`}
-    >
-      <Icon size={22} />
-      {tab.label}
-    </button>
-  )
+// ---------------------------------------------------------------------------
+// Adaptateurs PWA pour useSyncExternalStore
+// ---------------------------------------------------------------------------
+
+import type { PWAState } from '@/lib/pwa';
+function subscribePWAReact(cb: () => void): () => void {
+  return subscribePWA(() => cb());
+}
+function getPWAStateReact(): PWAState {
+  return getPWAState();
 }

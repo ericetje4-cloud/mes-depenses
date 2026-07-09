@@ -1,22 +1,44 @@
-import { useCallback, useState } from 'react'
+// ===========================================================================
+// Navigation simple par hash routing (#/dashboard, #/add...).
+// Léger, PWA-friendly (pas d'History API requise), mémorise l'onglet actif.
+// ===========================================================================
 
-export type Page = 'dashboard' | 'add' | 'history' | 'budgets' | 'settings'
+import { useCallback, useEffect, useState } from 'react';
 
-/**
- * Navigation simple basée sur l'état local.
- * Évite d'ajouter react-router pour garder l'app légère et 100% offline.
- */
-export function useNavigation(initial: Page = 'dashboard') {
-  const [page, setPage] = useState<Page>(initial)
+export type Route =
+  | 'dashboard'
+  | 'add'
+  | 'history'
+  | 'budgets'
+  | 'recurring'
+  | 'settings';
 
-  /** Params optionnels transmis à la page (ex: dépense à éditer). */
-  const [params, setParams] = useState<Record<string, unknown>>({})
+const ROUTES: Route[] = ['dashboard', 'add', 'history', 'budgets', 'recurring', 'settings'];
+const DEFAULT_ROUTE: Route = 'dashboard';
 
-  const navigate = useCallback((next: Page, nextParams: Record<string, unknown> = {}) => {
-    setPage(next)
-    setParams(nextParams)
-    window.scrollTo({ top: 0 })
-  }, [])
+function parseHash(): Route {
+  const h = window.location.hash.replace(/^#\/?/, '').split('?')[0] as Route;
+  return ROUTES.includes(h) ? h : DEFAULT_ROUTE;
+}
 
-  return { page, params, navigate }
+export function useNavigation() {
+  const [route, setRoute] = useState<Route>(parseHash());
+
+  useEffect(() => {
+    const onHash = () => setRoute(parseHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  const navigate = useCallback((to: Route) => {
+    window.location.hash = `/${to}`;
+    // scroll en haut à chaque navigation
+    window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+  }, []);
+
+  return { route, navigate };
+}
+
+export function navigateTo(route: Route): void {
+  window.location.hash = `/${route}`;
 }

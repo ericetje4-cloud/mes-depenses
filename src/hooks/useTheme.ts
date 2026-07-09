@@ -1,35 +1,77 @@
-import { useEffect, useState } from 'react'
+// ===========================================================================
+// Thème : light / dark / system (adaptatif ou manuel).
+// Persistance dans IndexedDB (settings) + respect de prefers-color-scheme.
+// ===========================================================================
 
-type Theme = 'light' | 'dark'
+import { useEffect, useState } from 'react';
+import { getSetting, setSetting } from '@/lib/db';
 
-const STORAGE_KEY = 'depenses-theme'
+export type ThemeMode = 'light' | 'dark' | 'system';
 
-/** Lit le thème initial : préférence sauvegardée, sinon préférence système. */
-function getInitialTheme(): Theme {
-  const saved = localStorage.getItem(STORAGE_KEY) as Theme | null
-  if (saved === 'light' || saved === 'dark') return saved
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+const MEDIA = window.matchMedia('(prefers-color-scheme: dark)');
+
+/** Calcule le thème effectif (résolu) à partir du mode choisi. */
+function resolveTheme(mode: ThemeMode): 'light' | 'dark' {
+  return mode === 'system' ? (MEDIA.matches ? 'dark' : 'light') : mode;
 }
 
-/**
- * Gestion du mode sombre / clair.
- * Pilote la classe `.dark` sur <html> et persiste le choix.
- */
+function applyTheme(resolved: 'light' | 'dark') {
+  const root = document.documentElement;
+  root.classList.toggle('dark', resolved === 'dark');
+  // Met à jour la meta theme-color pour la barre du navigateur mobile.
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) {
+    meta.setAttribute('content', resolved === 'dark' ? '#0f172a' : '#4f46e5');
+  }
+}
+
 export function useTheme() {
-  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const [mode, setMode] = useState<ThemeMode>('system');
+  const [resolved, setResolved] = useState<'light' | 'dark'>(
+    MEDIA.matches ? 'dark' : 'light',
+  );
 
+  // Chargement initial depuis IndexedDB.
   useEffect(() => {
-    const root = document.documentElement
-    if (theme === 'dark') root.classList.add('dark')
-    else root.classList.remove('dark')
-    localStorage.setItem(STORAGE_KEY, theme)
-    // Met à jour la couleur de la barre d'état mobile.
-    document
-      .querySelector('meta[name="theme-color"]')
-      ?.setAttribute('content', theme === 'dark' ? '#0f172a' : '#4f46e5')
-  }, [theme])
+    let cancelled = false;
+    (async () => {
+      const stored = await getSetting('theme');
+      if (cancelled) return;
+      const m: ThemeMode = stored ?? 'system';
+      setMode(m);
+      const r = resolveTheme(m);
+      setResolved(r);
+      applyTheme(r);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  const toggle = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
+  // Suivi du système quand mode === 'system'.
+  useEffect(() => {
+    if (mode !== 'system') return;
+    const onChange = () => {
+      const r = MEDIA.matches ? 'dark' : 'light';
+      setResolved(r);
+      applyTheme(r);
+    };
+    MEDIA.addEventListener('change', onChange);
+    return () => MEDIA.removeEventListener('change', onChange);
+  }, [mode]);
 
-  return { theme, toggle }
+  async function changeMode(m: ThemeMode) {
+    setMode(m);
+    const r = resolveTheme(m);
+    setResolved(r);
+    applyTheme(r);
+    await setSetting('theme', m);
+  }
+
+  /** Bascule rapide light <-> dark. */
+  async function toggle() {
+    await changeMode(resolved === 'dark' ? 'light' : 'dark');
+  }
+
+  return { mode, resolved, changeMode, toggle };
 }

@@ -1,110 +1,72 @@
-import { useState } from 'react'
-import { Layout } from './components/Layout'
-import { DashboardPage } from './pages/DashboardPage'
-import { HistoryPage } from './pages/HistoryPage'
-import { BudgetsPage } from './pages/BudgetsPage'
-import { SettingsPage } from './pages/SettingsPage'
-import { AddPage } from './pages/AddPage'
-import { useStore } from './hooks/useStore'
-import { useTheme } from './hooks/useTheme'
-import { useNavigation } from './hooks/useNavigation'
-import type { Expense } from './types'
+// ===========================================================================
+// App : racine. Initialise le store + PWA, branche le routing et les
+// providers (Toasts). Affiche un splash le temps de l'init IndexedDB.
+// ===========================================================================
+
+import { useEffect, useState } from 'react';
+import { initStore, useStore } from '@/hooks/useStore';
+import { setupPWA } from '@/lib/pwa';
+import { useNavigation } from '@/hooks/useNavigation';
+import { ToastProvider } from '@/components/ui';
+import { DashboardPage } from '@/pages/DashboardPage';
+import { AddPage } from '@/pages/AddPage';
+import { HistoryPage } from '@/pages/HistoryPage';
+import { BudgetsPage } from '@/pages/BudgetsPage';
+import { RecurringPage } from '@/pages/RecurringPage';
+import { SettingsPage } from '@/pages/SettingsPage';
 
 export default function App() {
-  const { theme, toggle } = useTheme()
-  const store = useStore()
-  const { page, navigate } = useNavigation('dashboard')
+  const { ready } = useStore();
+  const { route } = useNavigation();
+  const [inited, setInited] = useState(false);
 
-  // L'écran "Ajouter" est une surcouche (modal-like plein écran) plutôt qu'un onglet.
-  const [adding, setAdding] = useState(false)
-  const [editing, setEditing] = useState<Expense | undefined>(undefined)
+  // Initialisation unique : IndexedDB + Service Worker.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      await initStore();
+      setupPWA();
+      if (!cancelled) setInited(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  function openAdd() {
-    setEditing(undefined)
-    setAdding(true)
-  }
-
-  function openEdit(expense: Expense) {
-    setEditing(expense)
-    setAdding(true)
-  }
-
-  function closeAdd() {
-    setAdding(false)
-    setEditing(undefined)
-  }
-
-  async function handleSave(expense: Expense) {
-    await store.addExpense(expense)
-    closeAdd()
-  }
-
-  async function handleDelete(id: string) {
-    await store.removeExpense(id)
-    closeAdd()
-  }
-
-  // Écran d'ajout/édition en plein écran.
-  if (adding) {
+  // Splash pendant l'initialisation.
+  if (!inited || !ready) {
     return (
-      <div className="min-h-full bg-slate-50 px-4 pb-10 pt-5 dark:bg-slate-950 sm:px-6">
-        <div className="mx-auto max-w-2xl">
-          <AddPage
-            categories={store.categories}
-            editing={editing}
-            onSave={handleSave}
-            onDelete={handleDelete}
-            onCancel={closeAdd}
-          />
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3">
+        <div className="flex h-14 w-14 animate-pulse items-center justify-center rounded-2xl bg-brand-600 text-white">
+          <span className="text-2xl">€</span>
         </div>
+        <p className="text-sm text-slate-400">Chargement…</p>
       </div>
-    )
-  }
-
-  // État de chargement initial.
-  if (store.loading) {
-    return (
-      <div className="flex min-h-full items-center justify-center bg-slate-50 dark:bg-slate-950">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
-      </div>
-    )
+    );
   }
 
   return (
-    <Layout page={page} onNavigate={(p) => navigate(p)} onAdd={openAdd}>
-      {page === 'dashboard' && (
-        <DashboardPage
-          expenses={store.expenses}
-          categories={store.categories}
-          budgets={store.budgets}
-        />
-      )}
-      {page === 'history' && (
-        <HistoryPage
-          expenses={store.expenses}
-          categories={store.categories}
-          onEdit={openEdit}
-        />
-      )}
-      {page === 'budgets' && (
-        <BudgetsPage
-          expenses={store.expenses}
-          categories={store.categories}
-          budgets={store.budgets}
-          onSave={store.saveBudget}
-          onDelete={store.removeBudget}
-        />
-      )}
-      {page === 'settings' && (
-        <SettingsPage
-          categories={store.categories}
-          theme={theme}
-          onToggleTheme={toggle}
-          onAddCategory={store.addCategory}
-          onDeleteCategory={store.removeCategory}
-          onReload={store.reload}
-        />
-      )}
-    </Layout>
-  )
+    <ToastProvider>
+      {renderRoute(route)}
+    </ToastProvider>
+  );
+}
+
+function renderRoute(route: ReturnType<typeof useNavigation>['route']) {
+  switch (route) {
+    case 'dashboard':
+      return <DashboardPage />;
+    case 'add':
+      return <AddPage />;
+    case 'history':
+      return <HistoryPage />;
+    case 'budgets':
+      return <BudgetsPage />;
+    case 'recurring':
+      return <RecurringPage />;
+    case 'settings':
+      return <SettingsPage />;
+    default:
+      return <DashboardPage />;
+  }
 }

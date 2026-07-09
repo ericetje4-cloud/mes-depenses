@@ -1,305 +1,369 @@
-import { useEffect, useRef, useState } from 'react'
-import { Camera, Loader2, ScanLine, Save, Trash2, X } from 'lucide-react'
-import { Button, Card, Input, Label, Modal, Select, Textarea } from '../components/ui'
-import { Icon } from '../components/Icon'
-import { fileToDataURL, resizeImage } from '../lib/image'
-import { runOCR } from '../lib/ocr'
-import { parseReceipt } from '../lib/parser'
-import { suggestCategory } from '../lib/categories'
-import { formatEUR, todayISO } from '../lib/format'
-import { uid } from '../lib/store-utils'
-import { getLearnedMerchants } from '../lib/db'
-import type { Category, Expense } from '../types'
+// ===========================================================================
+// Page Ajout : scan OCR de ticket + ajout manuel rapide.
+// Pipeline : capture/upload → compression → OCR Tesseract → parser regex
+//            → formulaire pré-rempli (éditable) → validation → IndexedDB.
+// ===========================================================================
 
-type ScanState = 'idle' | 'reading' | 'recognizing'
+import { useEffect, useRef, useState } from 'react';
+import {
+  Camera,
+  ImagePlus,
+  ScanLine,
+  Loader2,
+  Check,
+  X,
+  Sparkles,
+} from 'lucide-react';
+import { useStore, addTransaction, suggestCategory } from '@/hooks/useStore';
+import { navigateTo } from '@/hooks/useNavigation';
+import { Layout } from '@/components/Layout';
+import { Icon } from '@/components/Icon';
+import { Field, useToast } from '@/components/ui';
+import { parseReceipt, type ParsedReceipt } from '@/lib/parser';
+import { recognizeImage, isOCRSupported, type OCRProgress } from '@/lib/ocr';
+import { compressImage } from '@/lib/image';
+import { formatEUR, parseISO, todayISO } from '@/lib/format';
+import type { TransactionSource } from '@/types';
 
-export function AddPage({
-  categories,
-  onSave,
-  onDelete,
-  onCancel,
-  editing,
-}: {
-  categories: Category[]
-  onSave: (e: Expense) => void
-  onDelete?: (id: string) => void
-  onCancel: () => void
-  editing?: Expense
-}) {
-  const [amount, setAmount] = useState(editing ? String(editing.amount) : '')
-  const [date, setDate] = useState(editing?.date ?? todayISO())
-  const [merchant, setMerchant] = useState(editing?.merchant ?? '')
-  const [categoryId, setCategoryId] = useState(editing?.categoryId ?? categories[0]?.id ?? 'autre')
-  const [note, setNote] = useState(editing?.note ?? '')
-  const [receiptImage, setReceiptImage] = useState<string | undefined>(editing?.receiptImage)
-  const [fromScan, setFromScan] = useState(editing?.fromScan ?? false)
+type Step = 'input' | 'scanning' | 'review';
 
-  const [scan, setScan] = useState<ScanState>('idle')
-  const [progress, setProgress] = useState(0)
-  const [statusText, setStatusText] = useState('')
-  const [scanError, setScanError] = useState('')
-  const [showDelete, setShowDelete] = useState(false)
-  const fileRef = useRef<HTMLInputElement>(null)
+export function AddPage() {
+  const { categories } = useStore();
+  const { toast } = useToast();
 
-  // Re-suggère la catégorie quand le marchand change (mode ajout uniquement).
+  const [step, setStep] = useState<Step>('input');
+  const [ocrProgress, setOcrProgress] = useState<OCRProgress | null>(null);
+  const [parsed, setParsed] = useState<ParsedReceipt | null>(null);
+  const [imageData, setImageData] = useState<string | undefined>();
+
+  // Champs du formulaire (pré-remplis après scan, ou vides pour ajout manuel).
+  const [merchant, setMerchant] = useState('');
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(todayISO());
+  const [categoryId, setCategoryId] = useState('');
+  const [note, setNote] = useState('');
+  const [source, setSource] = useState<TransactionSource>('manual');
+
+  const cameraInput = useRef<HTMLInputElement>(null);
+  const galleryInput = useRef<HTMLInputElement>(null);
+
+  // Suggestion auto de catégorie quand le marchand change (s'il n'a pas déjà
+  // été choisi par l'utilisateur ou le scan).
   useEffect(() => {
-    if (editing) return
-    if (!merchant.trim()) return
-    getLearnedMerchants().then((learned) => {
-      const suggested = suggestCategory(merchant, learned)
-      if (suggested) setCategoryId(suggested)
-    })
-  }, [merchant, editing])
+    if (!merchant || categoryId) return;
+    const suggested = suggestCategory(merchant);
+    if (suggested) setCategoryId(suggested);
+  }, [merchant, categoryId]);
 
-  async function handleScan(file: File) {
-    setScanError('')
+  /** Gère un fichier image (caméra ou galerie) : OCR complet. */
+  async function handleImage(file: File) {
+    if (!isOCRSupported()) {
+      toast('L\'OCR n\'est pas supporté sur ce navigateur.', 'warning');
+      return;
+    }
+    setStep('scanning');
+    setOcrProgress({ progress: 0, status: 'démarrage' });
+
     try {
-      setScan('reading')
-      const raw = await fileToDataURL(file)
-      const img = await resizeImage(raw)
-      setReceiptImage(img)
-      setScan('recognizing')
-      const result = await runOCR(img, (p, s) => {
-        setProgress(Math.round(p * 100))
-        setStatusText(s)
-      })
-      const parsed = parseReceipt(result.text)
-      if (parsed.merchant) setMerchant(parsed.merchant)
-      if (parsed.date) setDate(parsed.date)
-      if (parsed.amount !== null) setAmount(parsed.amount.toFixed(2))
-      setFromScan(true)
-      setScan('idle')
-    } catch (e) {
-      console.error(e)
-      setScanError(e instanceof Error ? e.message : String(e))
-      setScan('idle')
+      // 1. Compression + pré-traitement (grayscale pour meilleure OCR).
+      const compressed = await compressImage(file, {
+        maxWidth: 1280,
+        grayscale: true,
+        quality: 0.8,
+      });
+      setImageData(compressed);
+      setSource('scan');
+
+      // 2. OCR local Tesseract.
+      const ocrResult = await recognizeImage(compressed, (p) =>
+        setOcrProgress(p),
+      );
+
+      // 3. Parser regex.
+      const result = parseReceipt(ocrResult.text);
+      setParsed(result);
+
+      // 4. Pré-remplit le formulaire.
+      if (result.merchant) setMerchant(result.merchant);
+      if (result.date) setDate(result.date);
+      if (result.total != null) setAmount(String(result.total).replace('.', ','));
+
+      setStep('review');
+      toast('Ticket analysé ! Vérifiez les champs.', 'success');
+    } catch (err) {
+      console.error(err);
+      toast('Échec du scan. Saisie manuelle possible.', 'error');
+      setSource('manual');
+      setStep('review');
     }
   }
 
-  function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (file) handleScan(file)
-    if (fileRef.current) fileRef.current.value = ''
+  /** Passage en mode ajout manuel direct. */
+  function manualMode() {
+    setSource('manual');
+    setImageData(undefined);
+    setParsed(null);
+    setStep('review');
   }
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    const value = parseFloat(amount.replace(',', '.'))
-    if (!value || value <= 0) return
-    const now = Date.now()
-    const expense: Expense = {
-      id: editing?.id ?? uid(),
-      amount: value,
+  /** Validation de la dépense. */
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const amountNum = parseFloat(amount.replace(',', '.'));
+    if (!merchant.trim()) return toast('Indiquez un marchand.', 'warning');
+    if (!Number.isFinite(amountNum) || amountNum <= 0)
+      return toast('Montant invalide.', 'warning');
+    if (!categoryId) return toast('Choisissez une catégorie.', 'warning');
+
+    const d = parseISO(date);
+    if (!d) return toast('Date invalide.', 'warning');
+
+    await addTransaction({
+      amount: Math.round(amountNum * 100) / 100,
       date,
-      merchant: merchant.trim() || 'Dépense',
+      merchant: merchant.trim(),
       categoryId,
       note: note.trim() || undefined,
-      receiptImage,
-      fromScan,
-      createdAt: editing?.createdAt ?? now,
-      updatedAt: now,
-    }
-    onSave(expense)
+      source,
+      imageData,
+    });
+
+    toast('Dépense enregistrée ✓', 'success');
+    navigateTo('dashboard');
   }
 
-  const busy = scan !== 'idle'
+  function reset() {
+    setStep('input');
+    setParsed(null);
+    setImageData(undefined);
+    setMerchant('');
+    setAmount('');
+    setDate(todayISO());
+    setCategoryId('');
+    setNote('');
+    setSource('manual');
+  }
 
   return (
-    <div>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-900 dark:text-slate-50">
-          {editing ? 'Modifier la dépense' : 'Nouvelle dépense'}
-        </h1>
-        <button
-          onClick={onCancel}
-          className="rounded-full p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-        >
-          <X size={20} />
-        </button>
-      </div>
+    <Layout title="Ajouter une dépense">
+      {/* Inputs cachés pour capture (caméra) et galerie */}
+      <input
+        ref={cameraInput}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) handleImage(f);
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={galleryInput}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) handleImage(f);
+          e.target.value = '';
+        }}
+      />
 
-      {/* Bouton scan OCR */}
-      <input ref={fileRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={onFileChange} />
-
-      {scan === 'idle' ? (
-        <Card className="mb-4">
+      {step === 'input' && (
+        <div className="space-y-4">
           <button
-            type="button"
-            onClick={() => fileRef.current?.click()}
-            className="flex w-full items-center justify-center gap-2 rounded-xl border-2 border-dashed border-indigo-300 py-4 font-medium text-indigo-600 transition hover:bg-indigo-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950/30"
+            onClick={() => cameraInput.current?.click()}
+            className="card flex w-full items-center gap-4 p-5 text-left transition-transform active:scale-[0.98]"
           >
-            <ScanLine size={20} />
-            Scanner un ticket
-          </button>
-          {scanError && (
-            <p className="mt-2 text-center text-sm text-red-500">Échec du scan : {scanError}</p>
-          )}
-        </Card>
-      ) : (
-        <Card className="mb-4 flex items-center gap-3">
-          <Loader2 className="animate-spin text-indigo-500" size={22} />
-          <div className="text-sm">
-            <p className="font-medium text-slate-700 dark:text-slate-200">
-              {scan === 'reading' ? "Lecture de l'image…" : 'Reconnaissance du texte…'}
-            </p>
-            {statusText && (
-              <p className="text-slate-400">
-                {statusText} {progress > 0 && `· ${progress}%`}
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-100 text-brand-600 dark:bg-brand-900/40 dark:text-brand-400">
+              <Camera size={26} />
+            </div>
+            <div className="flex-1">
+              <p className="font-semibold">Scanner un ticket</p>
+              <p className="text-sm text-slate-500">
+                Prenez en photo un reçu — l'OCR remplit le formulaire.
               </p>
-            )}
+            </div>
+            <ScanLine size={20} className="text-brand-500" />
+          </button>
+
+          <button
+            onClick={() => galleryInput.current?.click()}
+            className="card flex w-full items-center gap-4 p-5 text-left transition-transform active:scale-[0.98]"
+          >
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+              <ImagePlus size={26} />
+            </div>
+            <div className="flex-1">
+              <p className="font-semibold">Importer une image</p>
+              <p className="text-sm text-slate-500">
+                Depuis la galerie (ticket déjà photographié).
+              </p>
+            </div>
+          </button>
+
+          <div className="flex items-center gap-3 py-2">
+            <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
+            <span className="text-xs text-slate-400">OU</span>
+            <div className="h-px flex-1 bg-slate-200 dark:bg-slate-800" />
           </div>
-        </Card>
+
+          <button onClick={manualMode} className="btn-secondary w-full">
+            <Sparkles size={18} /> Ajout manuel rapide
+          </button>
+          <p className="text-center text-xs text-slate-400">
+            Pour virements, abonnements ou achats en ligne.
+          </p>
+        </div>
       )}
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        {/* Montant */}
-        <div>
-          <Label>Montant</Label>
-          <div className="relative">
-            <Input
-              type="number"
-              inputMode="decimal"
-              step="0.01"
-              min="0"
-              placeholder="0,00"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="pr-10 text-lg font-semibold"
-              required
-              autoFocus={!editing}
-            />
-            <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-slate-400">
-              €
-            </span>
+      {step === 'scanning' && (
+        <div className="flex flex-col items-center justify-center gap-4 py-16">
+          <Loader2 size={48} className="animate-spin text-brand-500" />
+          <div className="text-center">
+            <p className="font-semibold">Analyse du ticket…</p>
+            <p className="text-sm text-slate-500">
+              {ocrProgress?.status ?? 'en cours'}
+            </p>
           </div>
-        </div>
-
-        {/* Marchand */}
-        <div>
-          <Label>Marchand / Libellé</Label>
-          <Input
-            placeholder="Ex : Carrefour, Netflix…"
-            value={merchant}
-            onChange={(e) => setMerchant(e.target.value)}
-          />
-        </div>
-
-        {/* Date + Catégorie */}
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label>Date</Label>
-            <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
-          </div>
-          <div>
-            <Label>Catégorie</Label>
-            <Select value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </Select>
-          </div>
-        </div>
-
-        {/* Note */}
-        <div>
-          <Label>Note (optionnel)</Label>
-          <Textarea
-            rows={2}
-            placeholder="Détails complémentaires…"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-        </div>
-
-        {/* Aperçu du ticket */}
-        {receiptImage && (
-          <div>
-            <Label>Ticket scanné</Label>
-            <img
-              src={receiptImage}
-              alt="Ticket"
-              className="max-h-40 w-auto rounded-lg border border-slate-200 dark:border-slate-700"
-            />
-          </div>
-        )}
-
-        {/* Actions */}
-        <div className="flex gap-3 pt-2">
-          <Button type="submit" className="flex-1" disabled={busy}>
-            <Save size={18} />
-            {editing ? 'Enregistrer' : 'Ajouter'}
-          </Button>
-          {editing && onDelete && (
-            <Button type="button" variant="danger" onClick={() => setShowDelete(true)}>
-              <Trash2 size={18} />
-            </Button>
+          {ocrProgress && (
+            <div className="w-full max-w-xs">
+              <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+                <div
+                  className="h-full bg-brand-500 transition-all"
+                  style={{ width: `${ocrProgress.progress * 100}%` }}
+                />
+              </div>
+            </div>
           )}
         </div>
-      </form>
+      )}
 
-      {/* Confirmation de suppression */}
-      <Modal open={showDelete} onClose={() => setShowDelete(false)} title="Supprimer la dépense ?">
-        <p className="text-sm text-slate-600 dark:text-slate-300">
-          Cette action est définitive. La dépense de{' '}
-          <strong>{formatEUR(editing?.amount ?? 0)}</strong> sera supprimée.
-        </p>
-        <div className="mt-5 flex gap-3">
-          <Button variant="secondary" className="flex-1" onClick={() => setShowDelete(false)}>
-            Annuler
-          </Button>
-          <Button
-            variant="danger"
-            className="flex-1"
-            onClick={() => {
-              if (editing && onDelete) onDelete(editing.id)
-            }}
-          >
-            Supprimer
-          </Button>
-        </div>
-      </Modal>
-    </div>
-  )
+      {step === 'review' && (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {imageData && (
+            <div className="card overflow-hidden">
+              <img
+                src={imageData}
+                alt="Ticket scanné"
+                className="max-h-48 w-full object-contain bg-slate-100 dark:bg-slate-800"
+              />
+            </div>
+          )}
+
+          {/* Badge confiance OCR */}
+          {parsed && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              {parsed.confidence.merchant > 0.5 && (
+                <span className="rounded-full bg-green-100 px-2 py-0.5 font-medium text-green-700 dark:bg-green-900/40 dark:text-green-400">
+                  Marchand détecté
+                </span>
+              )}
+              {parsed.confidence.date > 0.5 && (
+                <span className="rounded-full bg-green-100 px-2 py-0.5 font-medium text-green-700 dark:bg-green-900/40 dark:text-green-400">
+                  Date détectée
+                </span>
+              )}
+              {parsed.confidence.total > 0.5 && (
+                <span className="rounded-full bg-green-100 px-2 py-0.5 font-medium text-green-700 dark:bg-green-900/40 dark:text-green-400">
+                  Total détecté
+                </span>
+              )}
+              <span className="text-slate-400">
+                Vérifiez et corrigez si besoin.
+              </span>
+            </div>
+          )}
+
+          <Field label="Marchand" required>
+            <input
+              className="input"
+              value={merchant}
+              onChange={(e) => setMerchant(e.target.value)}
+              placeholder="ex. Carrefour"
+              autoFocus
+            />
+          </Field>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Montant (€)" required>
+              <input
+                className="input"
+                inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="0,00"
+              />
+            </Field>
+            <Field label="Date" required>
+              <input
+                type="date"
+                className="input"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+            </Field>
+          </div>
+
+          <Field label="Catégorie" required hint="Catégorie suggérée automatiquement">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {categories.map((cat) => (
+                <button
+                  type="button"
+                  key={cat.id}
+                  onClick={() => setCategoryId(cat.id)}
+                  className={`flex items-center gap-2 rounded-xl border px-3 py-2.5 text-sm transition-colors ${
+                    categoryId === cat.id
+                      ? 'border-brand-500 bg-brand-50 dark:bg-brand-900/30'
+                      : 'border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600'
+                  }`}
+                >
+                  <span
+                    className="flex h-6 w-6 items-center justify-center rounded-md text-white"
+                    style={{ backgroundColor: cat.color }}
+                  >
+                    <Icon name={cat.icon} size={13} />
+                  </span>
+                  <span className="truncate">{cat.label}</span>
+                  {categoryId === cat.id && (
+                    <Check size={14} className="ml-auto text-brand-500" />
+                  )}
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="Note (optionnel)">
+            <input
+              className="input"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="ex. Courses de la semaine"
+            />
+          </Field>
+
+          {/* Aperçu montant */}
+          {amount && (
+            <div className="card flex items-center justify-between p-4">
+              <span className="text-sm text-slate-500">Total à enregistrer</span>
+              <span className="text-xl font-bold text-brand-600 dark:text-brand-400">
+                {formatEUR(parseFloat(amount.replace(',', '.')) || 0)}
+              </span>
+            </div>
+          )}
+
+          <div className="flex gap-2 pt-1">
+            <button type="button" onClick={reset} className="btn-secondary">
+              <X size={16} /> Annuler
+            </button>
+            <button type="submit" className="btn-primary flex-1">
+              <Check size={16} /> Enregistrer
+            </button>
+          </div>
+        </form>
+      )}
+    </Layout>
+  );
 }
-
-/** Liste verticale des catégories (sélecteur visuel). Utilisé pour de futurs écrans. */
-export function CategoryPicker({
-  categories,
-  selected,
-  onSelect,
-}: {
-  categories: Category[]
-  selected: string
-  onSelect: (id: string) => void
-}) {
-  return (
-    <div className="grid grid-cols-3 gap-2">
-      {categories.map((c) => (
-        <button
-          key={c.id}
-          type="button"
-          onClick={() => onSelect(c.id)}
-          className={`flex flex-col items-center gap-1.5 rounded-xl border p-3 text-xs font-medium transition ${
-            selected === c.id
-              ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/40'
-              : 'border-slate-200 dark:border-slate-700'
-          }`}
-          style={selected === c.id ? { borderColor: c.color } : undefined}
-        >
-          <span
-            className="flex h-9 w-9 items-center justify-center rounded-full text-white"
-            style={{ backgroundColor: c.color }}
-          >
-            <Icon name={c.icon} size={18} />
-          </span>
-          {c.name}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-// Ré-export pour réutilisation de Camera dans d'autres écrans si besoin.
-export { Camera }

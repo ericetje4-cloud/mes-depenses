@@ -1,61 +1,36 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-import tailwindcss from '@tailwindcss/vite'
-import { VitePWA } from 'vite-plugin-pwa'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import { VitePWA } from 'vite-plugin-pwa';
+
+// Base path : pour GitHub Pages (servi sous /<repo>/), définir
+// VITE_BASE_PATH=/nom-du-repo. Vide par défaut (déploiement racine).
+const base = process.env.VITE_BASE_PATH ?? '/';
 
 // https://vite.dev/config/
 export default defineConfig({
-  // GitHub Pages sert l'app sous /depenses/, il faut donc un base correspondant
-  // pour que les chemins des assets et du Service Worker soient corrects.
-  base: '/depenses/',
+  base,
   plugins: [
     react(),
-    tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
-      // Permet de tester le Service Worker (et donc le offline) en `npm run dev`
-      devOptions: {
-        enabled: true,
-      },
-      includeAssets: ['favicon.ico', 'icons/*.png', 'tessdata/*.gz'],
-      manifest: {
-        name: 'Suivi de Dépenses',
-        short_name: 'Dépenses',
-        description: 'Suivi de dépenses personnelles — 100% local et hors-ligne',
-        theme_color: '#4f46e5',
-        background_color: '#0f172a',
-        display: 'standalone',
-        orientation: 'portrait',
-        start_url: '/depenses/',
-        scope: '/depenses/',
-        lang: 'fr',
-        icons: [
-          {
-            src: 'icons/icon-192.png',
-            sizes: '192x192',
-            type: 'image/png',
-          },
-          {
-            src: 'icons/icon-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-          },
-          {
-            src: 'icons/icon-maskable-512.png',
-            sizes: '512x512',
-            type: 'image/png',
-            purpose: 'maskable',
-          },
-        ],
-      },
+      // Le fichier de langue OCR (fra.traineddata) est volumineux (~12 Mo) :
+      // on l'exclut du precaching pour garder un SW léger, mais il reste
+      // mis en cache par le navigateur / Cache Storage lors de la 1re lecture.
+      includeAssets: ['favicon.svg', 'icons/*.png'],
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,wasm,traineddata}'],
-        // Les WASM de Tesseract font ~3,4 Mo : on relève la limite de précache.
-        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024, // 5 Mo
-        // Ressources runtime : on prend d'abord le cache, puis le réseau (offline-first)
+        globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'],
+        // On ne pré-cache jamais les gros assets de Tesseract.
+        globIgnores: ['**/tessdata/**'],
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         runtimeCaching: [
           {
-            urlPattern: ({ url }) => url.pathname.startsWith('/tessdata/'),
+            // Modèle OCR + core WASM Tesseract : mis en cache au runtime
+            // (trop volumineux pour le precache). Reste disponible hors-ligne
+            // après la 1re utilisation de l'OCR.
+            urlPattern: ({ url }) =>
+              url.pathname.includes('/tessdata/') ||
+              url.pathname.endsWith('.traineddata') ||
+              url.pathname.endsWith('.wasm'),
             handler: 'CacheFirst',
             options: {
               cacheName: 'tessdata-cache',
@@ -63,10 +38,69 @@ export default defineConfig({
                 maxEntries: 20,
                 maxAgeSeconds: 60 * 60 * 24 * 365, // 1 an
               },
+              cacheableResponse: { statuses: [0, 200] },
             },
           },
         ],
       },
+      manifest: {
+        name: 'Mes Dépenses',
+        short_name: 'Dépenses',
+        description: 'Suivi de dépenses 100% local, offline-first, avec scan de tickets.',
+        theme_color: '#4f46e5',
+        background_color: '#0f172a',
+        display: 'standalone',
+        orientation: 'portrait',
+        start_url: '/',
+        scope: '/',
+        lang: 'fr',
+        categories: ['finance', 'productivity'],
+        icons: [
+          {
+            src: '/icons/icon-192.png',
+            sizes: '192x192',
+            type: 'image/png',
+            purpose: 'any',
+          },
+          {
+            src: '/icons/icon-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'any',
+          },
+          {
+            src: '/icons/icon-maskable-512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable',
+          },
+        ],
+      },
+      devOptions: {
+        enabled: true,
+        type: 'module',
+      },
     }),
   ],
-})
+  // Tesseract.js charge des workers/wasm qu'on sert nous-mêmes depuis /public.
+  // On s'assure que les assets ne sont pas optimisés/cassés par Vite.
+  build: {
+    target: 'es2022',
+    // Code-splitting : sépare les grosses libs pour un meilleur cache
+    // navigateur et des chunks plus petits (Rolldown requiert une fonction).
+    rolldownOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('recharts') || id.includes('d3-') || id.includes('victory'))
+              return 'charts-vendor';
+            if (id.includes('tesseract.js')) return 'tesseract-vendor';
+            if (id.includes('react') || id.includes('scheduler'))
+              return 'react-vendor';
+          }
+        },
+      },
+    },
+    chunkSizeWarningLimit: 700,
+  },
+});

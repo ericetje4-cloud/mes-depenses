@@ -1,187 +1,283 @@
-import { useState } from 'react'
-import { Plus, Trash2 } from 'lucide-react'
-import { Button, Card, EmptyState, Input, Label, Modal, ProgressBar, Select } from '../components/ui'
-import { Icon } from '../components/Icon'
+// ===========================================================================
+// Page Budgets : budget mensuel global ou par catégorie, avec barres de
+// progression dynamiques (vert → orange → rouge en cas de dépassement).
+// ===========================================================================
+
+import { useMemo, useState } from 'react';
+import { Plus, PiggyBank, Target } from 'lucide-react';
 import {
-  budgetStatuses,
-  currentMonthKey,
-  expensesByMonth,
-  formatEUR,
-  totalExpenses,
-} from '../lib/format'
-import { uid } from '../lib/store-utils'
-import type { Budget, Category, Expense } from '../types'
+  useStore,
+  setBudget,
+  removeBudget,
+} from '@/hooks/useStore';
+import { Layout } from '@/components/Layout';
+import { Icon } from '@/components/Icon';
+import {
+  Field,
+  Modal,
+  ProgressBar,
+  EmptyState,
+  ConfirmDialog,
+  useToast,
+} from '@/components/ui';
+import { allBudgetsProgress, type BudgetStatus } from '@/lib/store-utils';
+import { formatEUR, monthLabel, monthKey, todayISO } from '@/lib/format';
+import type { BudgetScope } from '@/types';
 
-export function BudgetsPage({
-  expenses,
+export function BudgetsPage() {
+  const { transactions, categories, budgets } = useStore();
+  const { toast } = useToast();
+
+  const [showForm, setShowForm] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  const progress = useMemo(
+    () => allBudgetsProgress(transactions, budgets, categories),
+    [transactions, budgets, categories],
+  );
+
+  const mLabel = monthLabel(monthKey(todayISO()));
+
+  return (
+    <Layout
+      title="Budgets"
+      actions={
+        <button
+          onClick={() => setShowForm(true)}
+          className="rounded-lg p-2 text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/30"
+          aria-label="Ajouter un budget"
+        >
+          <Plus size={20} />
+        </button>
+      }
+    >
+      <div className="mb-4 flex items-center gap-2 text-sm text-slate-500">
+        <Target size={15} /> Progression pour {mLabel}
+      </div>
+
+      {progress.length > 0 ? (
+        <div className="space-y-3">
+          {progress.map((p) => {
+            const cat = categories.find(
+              (c) => c.id === p.budget?.categoryId,
+            );
+            const isOver = p.status === 'over';
+            return (
+              <div key={p.budget!.id} className="card p-4">
+                <div className="mb-2 flex items-center gap-3">
+                  {cat ? (
+                    <span
+                      className="flex h-9 w-9 items-center justify-center rounded-lg text-white"
+                      style={{ backgroundColor: cat.color }}
+                    >
+                      <Icon name={cat.icon} size={16} />
+                    </span>
+                  ) : (
+                    <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600 text-white">
+                      <PiggyBank size={16} />
+                    </span>
+                  )}
+                  <div className="flex-1">
+                    <p className="font-medium">{p.label}</p>
+                    <p className="text-xs text-slate-400">
+                      {formatEUR(p.spent)} / {formatEUR(p.amount)}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p
+                      className={`text-sm font-bold ${overColor(p.status)}`}
+                    >
+                      {Math.round(p.progress * 100)}%
+                    </p>
+                    <button
+                      onClick={() => setDeleting(p.budget!.id)}
+                      className="text-xs text-slate-300 hover:text-red-500"
+                    >
+                      supprimer
+                    </button>
+                  </div>
+                </div>
+                <ProgressBar value={p.progress} status={p.status} />
+                {isOver && (
+                  <p className="mt-2 text-xs font-medium text-red-600 dark:text-red-400">
+                    Budget dépassé de {formatEUR(p.spent - p.amount)}
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyState
+          icon="Target"
+          title="Aucun budget défini"
+          description="Fixez un plafond mensuel pour suivre vos dépenses et être alerté en cas de dépassement."
+          action={
+            <button onClick={() => setShowForm(true)} className="btn-primary mt-2">
+              <Plus size={16} /> Créer un budget
+            </button>
+          }
+        />
+      )}
+
+      {showForm && (
+        <BudgetForm
+          categories={categories}
+          existing={budgets}
+          onClose={() => setShowForm(false)}
+          onSaved={() => {
+            setShowForm(false);
+            toast('Budget enregistré ✓', 'success');
+          }}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!deleting}
+        title="Supprimer le budget ?"
+        message="Vous pourrez le recréer à tout moment."
+        confirmLabel="Supprimer"
+        danger
+        onConfirm={async () => {
+          if (deleting) {
+            await removeBudget(deleting);
+            toast('Budget supprimé', 'info');
+          }
+          setDeleting(null);
+        }}
+        onCancel={() => setDeleting(null)}
+      />
+    </Layout>
+  );
+}
+
+function overColor(status: BudgetStatus): string {
+  switch (status) {
+    case 'ok':
+      return 'text-green-600 dark:text-green-400';
+    case 'warning':
+      return 'text-amber-600 dark:text-amber-400';
+    case 'danger':
+    case 'over':
+      return 'text-red-600 dark:text-red-400';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Formulaire de création / édition de budget
+// ---------------------------------------------------------------------------
+
+function BudgetForm({
   categories,
-  budgets,
-  onSave,
-  onDelete,
+  existing,
+  onClose,
+  onSaved,
 }: {
-  expenses: Expense[]
-  categories: Category[]
-  budgets: Budget[]
-  onSave: (b: Budget) => void
-  onDelete: (id: string) => void
+  categories: ReturnType<typeof useStore>['categories'];
+  existing: ReturnType<typeof useStore>['budgets'];
+  onClose: () => void;
+  onSaved: () => void;
 }) {
-  const [showForm, setShowForm] = useState(false)
-  const [formType, setFormType] = useState<'global' | 'category'>('global')
-  const [formCategory, setFormCategory] = useState(categories[0]?.id ?? 'autre')
-  const [formAmount, setFormAmount] = useState('')
+  const [scope, setScope] = useState<BudgetScope>('global');
+  const [categoryId, setCategoryId] = useState(categories[0]?.id ?? '');
+  const [amount, setAmount] = useState('');
 
-  const curKey = currentMonthKey()
-  const monthExpenses = expensesByMonth(expenses, curKey)
-  const statuses = budgetStatuses(budgets, monthExpenses)
-  const globalSpent = totalExpenses(monthExpenses)
+  // Catégories qui n'ont pas encore de budget.
+  const availableCats = categories.filter(
+    (c) => !existing.some((b) => b.categoryId === c.id),
+  );
+  const hasGlobal = existing.some((b) => b.scope === 'global');
 
-  function handleSave() {
-    const amount = parseFloat(formAmount.replace(',', '.'))
-    if (!amount || amount <= 0) return
-    const budget: Budget = {
-      id: uid(),
-      type: formType,
-      categoryId: formType === 'category' ? formCategory : undefined,
-      amount,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
+  async function save() {
+    const amountNum = parseFloat(amount.replace(',', '.'));
+    if (!Number.isFinite(amountNum) || amountNum <= 0) return;
+    if (scope === 'category' && !categoryId) return;
+    if (scope === 'global' && hasGlobal) {
+      // Édite le budget global existant.
+      await setBudget('global', amountNum);
+    } else {
+      await setBudget(
+        scope,
+        amountNum,
+        scope === 'category' ? categoryId : undefined,
+      );
     }
-    onSave(budget)
-    setShowForm(false)
-    setFormAmount('')
+    onSaved();
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-900 dark:text-slate-50">Budgets</h1>
-        <Button onClick={() => setShowForm(true)}>
-          <Plus size={18} />
-          Budget
-        </Button>
-      </div>
+    <Modal
+      open
+      onClose={onClose}
+      title="Nouveau budget"
+      footer={
+        <>
+          <button className="btn-secondary flex-1" onClick={onClose}>
+            Annuler
+          </button>
+          <button className="btn-primary flex-1" onClick={save}>
+            Enregistrer
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => setScope('global')}
+            className={`rounded-xl border p-3 text-sm font-medium ${
+              scope === 'global'
+                ? 'border-brand-500 bg-brand-50 dark:bg-brand-900/30'
+                : 'border-slate-200 dark:border-slate-700'
+            }`}
+          >
+            <PiggyBank size={18} className="mb-1" />
+            Global
+            {hasGlobal && (
+              <span className="mt-1 block text-[10px] text-slate-400">(écrase l'existant)</span>
+            )}
+          </button>
+          <button
+            onClick={() => setScope('category')}
+            disabled={availableCats.length === 0}
+            className={`rounded-xl border p-3 text-sm font-medium disabled:opacity-40 ${
+              scope === 'category'
+                ? 'border-brand-500 bg-brand-50 dark:bg-brand-900/30'
+                : 'border-slate-200 dark:border-slate-700'
+            }`}
+          >
+            <Target size={18} className="mb-1" />
+            Par catégorie
+          </button>
+        </div>
 
-      {statuses.length === 0 ? (
-        <Card>
-          <EmptyState
-            icon={<Icon name="PiggyBank" size={40} />}
-            title="Aucun budget défini"
-            description="Fixez un plafond mensuel global ou par catégorie pour suivre vos dépenses."
-            action={
-              <Button onClick={() => setShowForm(true)}>
-                <Plus size={18} />
-                Créer un budget
-              </Button>
-            }
+        {scope === 'category' && (
+          <Field label="Catégorie" required>
+            <select
+              className="input"
+              value={categoryId}
+              onChange={(e) => setCategoryId(e.target.value)}
+            >
+              {availableCats.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+
+        <Field label="Montant mensuel (€)" required>
+          <input
+            className="input"
+            inputMode="decimal"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            placeholder="ex. 300"
+            autoFocus
           />
-        </Card>
-      ) : (
-        <div className="space-y-3">
-          {statuses.map(({ budget, spent, ratio, state }) => {
-            const name =
-              budget.type === 'global'
-                ? 'Budget global'
-                : categories.find((c) => c.id === budget.categoryId)?.name ?? 'Catégorie'
-            const color =
-              budget.type === 'category'
-                ? categories.find((c) => c.id === budget.categoryId)?.color
-                : undefined
-            return (
-              <Card key={budget.id}>
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-2">
-                    {color && (
-                      <span
-                        className="h-3 w-3 rounded-full"
-                        style={{ backgroundColor: color }}
-                      />
-                    )}
-                    <div>
-                      <p className="font-semibold text-slate-800 dark:text-slate-100">{name}</p>
-                      <p className="text-xs text-slate-400">
-                        {formatEUR(spent)} / {formatEUR(budget.amount)}
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => onDelete(budget.id)}
-                    className="rounded-lg p-1.5 text-slate-300 hover:bg-red-50 hover:text-red-500 dark:text-slate-600 dark:hover:bg-red-950/40"
-                  >
-                    <Trash2 size={16} />
-                  </button>
-                </div>
-                <div className="mt-3">
-                  <ProgressBar ratio={ratio} state={state} />
-                  <p className="mt-1.5 text-right text-xs font-medium text-slate-400">
-                    {Math.round(ratio * 100)}%
-                    {state === 'over'
-                      ? ' · dépassé'
-                      : state === 'warning'
-                        ? ' · attention'
-                        : ''}
-                  </p>
-                </div>
-              </Card>
-            )
-          })}
-
-          {/* Récap global */}
-          <Card className="bg-slate-50 dark:bg-slate-800/50">
-            <p className="text-sm text-slate-500 dark:text-slate-400">
-              Dépensé ce mois-ci (toutes catégories)
-            </p>
-            <p className="mt-1 text-2xl font-bold text-slate-800 dark:text-slate-100">
-              {formatEUR(globalSpent)}
-            </p>
-          </Card>
-        </div>
-      )}
-
-      {/* Formulaire d'ajout */}
-      <Modal open={showForm} onClose={() => setShowForm(false)} title="Nouveau budget">
-        <div className="space-y-4">
-          <div>
-            <Label>Type</Label>
-            <Select value={formType} onChange={(e) => setFormType(e.target.value as 'global' | 'category')}>
-              <option value="global">Budget global</option>
-              <option value="category">Par catégorie</option>
-            </Select>
-          </div>
-          {formType === 'category' && (
-            <div>
-              <Label>Catégorie</Label>
-              <Select value={formCategory} onChange={(e) => setFormCategory(e.target.value)}>
-                {categories.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </Select>
-            </div>
-          )}
-          <div>
-            <Label>Montant mensuel (€)</Label>
-            <Input
-              type="number"
-              inputMode="decimal"
-              step="0.01"
-              min="0"
-              placeholder="200"
-              value={formAmount}
-              onChange={(e) => setFormAmount(e.target.value)}
-              autoFocus
-            />
-          </div>
-          <div className="flex gap-3 pt-2">
-            <Button variant="secondary" className="flex-1" onClick={() => setShowForm(false)}>
-              Annuler
-            </Button>
-            <Button className="flex-1" onClick={handleSave} disabled={!formAmount}>
-              Créer
-            </Button>
-          </div>
-        </div>
-      </Modal>
-    </div>
-  )
+        </Field>
+      </div>
+    </Modal>
+  );
 }

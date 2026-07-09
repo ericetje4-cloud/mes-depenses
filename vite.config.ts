@@ -9,6 +9,15 @@ const base = process.env.VITE_BASE_PATH ?? '/';
 // https://vite.dev/config/
 export default defineConfig({
   base,
+
+  // Autorise l'accès depuis un tunnel (cloudflared, ngrok...) pour tester la
+  // PWA sur mobile en HTTPS. true = accepte tous les hôtes (dev/preview only).
+  preview: {
+    allowedHosts: true,
+  },
+  server: {
+    allowedHosts: true,
+  },
   plugins: [
     react(),
     VitePWA({

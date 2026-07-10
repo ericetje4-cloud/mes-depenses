@@ -12,13 +12,13 @@
 // ===========================================================================
 
 /** Modèle Gemini par défaut (multimodal + function calling, gratuit AI Studio). */
-export const DEFAULT_MODEL = 'gemini-2.5-flash';
+export const DEFAULT_MODEL = 'gemini-3.5-flash';
 
 /** Modèles proposés dans les réglages. */
 export const AVAILABLE_MODELS: { id: string; label: string; hint: string }[] = [
-  { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', hint: 'Rapide, équilibré (recommandé)' },
-  { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', hint: 'Plus précis, plus lent' },
-  { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', hint: 'Génération précédente' },
+  { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', hint: 'Rapide, équilibré (recommandé)' },
+  { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', hint: 'Plus précis, plus lent (preview)' },
+  { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', hint: 'Le plus rapide/économique' },
 ];
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta';
@@ -278,3 +278,55 @@ export async function testApiKey(
 
 /** Réexport pour construire des parts inline depuis une data-URL. */
 export { inlineFromDataURL };
+
+// ---------------------------------------------------------------------------
+// Liste des modèles disponibles (interrogation live de l'API)
+// ---------------------------------------------------------------------------
+
+export interface GeminiModelInfo {
+  /** Nom complet renvoyé par l'API, ex: "models/gemini-3.5-flash". */
+  name: string;
+  /** Nom court, ex: "gemini-3.5-flash". */
+  id: string;
+  /** Méthodes supportées (ex: generateContent). */
+  methods: string[];
+}
+
+/**
+ * Interroge Google pour lister les modèles accessibles avec la clé donnée.
+ * On ne garde que ceux qui supportent generateContent (utilisables par l'agent).
+ */
+export async function listModels(
+  key: string,
+): Promise<{ ok: true; models: GeminiModelInfo[] } | { ok: false; message: string }> {
+  const trimmed = key.trim();
+  if (!trimmed) return { ok: false, message: 'Clé vide.' };
+  const url = `${BASE}/models?key=${encodeURIComponent(trimmed)}`;
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null);
+      return { ok: false, message: body?.error?.message ?? `Erreur HTTP ${resp.status}` };
+    }
+    const data = await resp.json();
+    const all = (data?.models ?? []) as {
+      name: string;
+      supportedGenerationMethods?: string[];
+    }[];
+    const models: GeminiModelInfo[] = all
+      .filter(
+        (m) =>
+          m.supportedGenerationMethods?.includes('generateContent') &&
+          typeof m.name === 'string',
+      )
+      .map((m) => ({
+        name: m.name,
+        id: m.name.replace(/^models\//, ''),
+        methods: m.supportedGenerationMethods ?? [],
+      }));
+    return { ok: true, models };
+  } catch {
+    return { ok: false, message: 'Réseau injoignable.' };
+  }
+}
+

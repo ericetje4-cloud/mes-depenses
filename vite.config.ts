@@ -20,6 +20,13 @@ export default defineConfig({
   server: {
     allowedHosts: true,
   },
+  resolve: {
+    // Alias '@' -> '/src' pour les imports type '@/lib/...'.
+    // Requis par Vite en dev (le build résout aussi via tsconfig.paths).
+    alias: {
+      '@': '/src',
+    },
+  },
   plugins: [
     react(),
     VitePWA({

@@ -242,8 +242,14 @@ export function parseResponse(
 // ---------------------------------------------------------------------------
 
 /**
- * Valide une clé API par un appel minimal.
- * @returns ok=true si valide, sinon ok=false avec un message.
+ * Valide une clé API en deux temps pour distinguer les causes d'échec :
+ *   1. Appel à ListModels (sans modèle) → valide la clé indépendamment de
+ *      tout modèle. Permet de distinguer « clé invalide » de « modèle
+ *      inaccessible ».
+ *   2. Si la clé est valide, ping generateContent sur le modèle choisi pour
+ *      vérifier qu'il est bien accessible avec cette clé.
+ * @returns ok=true si la clé et le modèle fonctionnent, sinon ok=false avec
+ *          un message précisant la cause.
  */
 export async function testApiKey(
   key: string,
@@ -252,6 +258,25 @@ export async function testApiKey(
   const trimmed = key.trim();
   if (!trimmed) return { ok: false, message: 'Clé vide.' };
 
+  // --- Étape 1 : validité de la clé (sans modèle) ---
+  const keyCheck = await listModels(trimmed);
+  if (!keyCheck.ok) {
+    return { ok: false, message: keyCheck.message };
+  }
+
+  // Si le modèle choisi n'est pas dans la liste renvoyée par l'API, on ne
+  // fait même pas le ping : l'appel échouerait. On l'indique clairement.
+  const available = keyCheck.models.map((m) => m.id);
+  if (!available.includes(model)) {
+    // Suggestion : les 3 modèles generateContent les plus pertinents.
+    const suggest = available.filter((m) => m.startsWith('gemini-')).slice(0, 3);
+    return {
+      ok: false,
+      message: `Clé valide, mais le modèle « ${model} » n'est pas accessible. Essayez : ${suggest.join(', ') || available[0]}.`,
+    };
+  }
+
+  // --- Étape 2 : ping du modèle choisi ---
   const url = `${BASE}/models/${model}:generateContent?key=${encodeURIComponent(trimmed)}`;
   try {
     const resp = await fetch(url, {
@@ -267,7 +292,7 @@ export async function testApiKey(
       const body = await resp.json().catch(() => null);
       return {
         ok: false,
-        message: body?.error?.message ?? 'Clé rejetée par Google.',
+        message: body?.error?.message ?? 'Modèle rejeté par Google.',
       };
     }
     return { ok: false, message: `Erreur HTTP ${resp.status}.` };

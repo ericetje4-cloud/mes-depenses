@@ -125,3 +125,28 @@ export async function applyUpdate(): Promise<void> {
 export function dismissUpdate(): void {
   setState({ needRefresh: false });
 }
+
+/**
+ * Vide tous les caches de l'application (Cache Storage) et désenregistre les
+ * Service Workers, pour forcer le chargement de la dernière version publiée.
+ *
+ * Les PWA offline-first continuent parfois de servir une ancienne version
+ * pendant un certain temps : cette fonction contourne ce comportement.
+ *
+ * ⚠️ Les données utilisateur (IndexedDB : dépenses, catégories, budgets) sont
+ *    PRÉSERVÉES — seuls les caches d'assets (JS/CSS/images) sont effacés.
+ */
+export async function clearAppCaches(): Promise<void> {
+  // 1. Vide tout le Cache Storage (assets pré-cache + caches runtime).
+  if ('caches' in window) {
+    const keys = await caches.keys();
+    await Promise.all(keys.map((k) => caches.delete(k)));
+  }
+
+  // 2. Désenregistre tous les Service Workers pour forcer la reprise depuis
+  //    le réseau au prochain chargement.
+  if ('serviceWorker' in navigator) {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(regs.map((r) => r.unregister()));
+  }
+}

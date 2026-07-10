@@ -22,6 +22,7 @@ import {
   Mic,
   Volume2,
   Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import {
   useStore,
@@ -45,6 +46,7 @@ import { CATEGORY_COLORS, CATEGORY_ICONS } from '@/lib/categories';
 import { exportBackupJSON, readBackupFile } from '@/lib/export';
 import { estimateDataURLSize } from '@/lib/image';
 import { getSetting, setSetting } from '@/lib/db';
+import { clearAppCaches } from '@/lib/pwa';
 import {
   setApiKey,
   setModel,
@@ -65,6 +67,7 @@ export function SettingsPage() {
   const [showCatForm, setShowCatForm] = useState(false);
   const [editingCat, setEditingCat] = useState<Category | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
+  const [clearCacheOpen, setClearCacheOpen] = useState(false);
 
   // --- Réglages Agent IA ---
   const [keyInput, setKeyInput] = useState('');
@@ -346,6 +349,12 @@ export function SettingsPage() {
               <Upload size={16} /> Importer une sauvegarde (JSON)
             </button>
             <button
+              onClick={() => setClearCacheOpen(true)}
+              className="btn-secondary w-full justify-start"
+            >
+              <RefreshCw size={16} /> Vider le cache de l'application
+            </button>
+            <button
               onClick={() => setResetOpen(true)}
               className="flex w-full items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30"
             >
@@ -412,6 +421,23 @@ export function SettingsPage() {
           toast('Données réinitialisées', 'info');
         }}
         onCancel={() => setResetOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={clearCacheOpen}
+        title="Vider le cache de l'application ?"
+        message="Les fichiers en cache (JS, CSS, images) seront effacés et les Service Workers désactivés pour forcer le chargement de la dernière version. Vos données (dépenses, budgets) sont conservées. L'application va recharger."
+        confirmLabel="Vider & recharger"
+        onConfirm={async () => {
+          setClearCacheOpen(false);
+          try {
+            await clearAppCaches();
+          } finally {
+            // Recharge depuis le réseau pour récupérer la dernière version.
+            window.location.reload();
+          }
+        }}
+        onCancel={() => setClearCacheOpen(false)}
       />
     </Layout>
   );

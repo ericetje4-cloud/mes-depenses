@@ -6,6 +6,8 @@
 import { useEffect, useState } from 'react';
 import { initStore, useStore } from '@/hooks/useStore';
 import { setupPWA } from '@/lib/pwa';
+import { getSetting } from '@/lib/db';
+import { setApiKey, setModel, DEFAULT_MODEL } from '@/lib/gemini';
 import { useNavigation } from '@/hooks/useNavigation';
 import { ToastProvider } from '@/components/ui';
 import { DashboardPage } from '@/pages/DashboardPage';
@@ -13,6 +15,7 @@ import { AddPage } from '@/pages/AddPage';
 import { HistoryPage } from '@/pages/HistoryPage';
 import { BudgetsPage } from '@/pages/BudgetsPage';
 import { RecurringPage } from '@/pages/RecurringPage';
+import { AgentPage } from '@/pages/AgentPage';
 import { SettingsPage } from '@/pages/SettingsPage';
 
 export default function App() {
@@ -20,11 +23,16 @@ export default function App() {
   const { route } = useNavigation();
   const [inited, setInited] = useState(false);
 
-  // Initialisation unique : IndexedDB + Service Worker.
+  // Initialisation unique : IndexedDB + Service Worker + clé Gemini.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       await initStore();
+      // Charge la clé API + le modèle sauvegardés pour l'agent.
+      const key = await getSetting('geminiKey');
+      if (key) setApiKey(key);
+      const model = await getSetting('geminiModel');
+      setModel(model ?? DEFAULT_MODEL);
       setupPWA();
       if (!cancelled) setInited(true);
     })();
@@ -64,6 +72,8 @@ function renderRoute(route: ReturnType<typeof useNavigation>['route']) {
       return <BudgetsPage />;
     case 'recurring':
       return <RecurringPage />;
+    case 'agent':
+      return <AgentPage />;
     case 'settings':
       return <SettingsPage />;
     default:

@@ -3,7 +3,7 @@
 // JSON (sauvegarde complète), réinitialisation, infos PWA.
 // ===========================================================================
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Moon,
   Sun,
@@ -18,6 +18,10 @@ import {
   Shield,
   Info,
   X,
+  Sparkles,
+  Mic,
+  Volume2,
+  Loader2,
 } from 'lucide-react';
 import {
   useStore,
@@ -40,6 +44,16 @@ import {
 import { CATEGORY_COLORS, CATEGORY_ICONS } from '@/lib/categories';
 import { exportBackupJSON, readBackupFile } from '@/lib/export';
 import { estimateDataURLSize } from '@/lib/image';
+import { getSetting, setSetting } from '@/lib/db';
+import {
+  setApiKey,
+  setModel,
+  testApiKey,
+  hasApiKey,
+  DEFAULT_MODEL,
+  AVAILABLE_MODELS,
+} from '@/lib/gemini';
+import { isSTTSupported, isTTSSupported } from '@/lib/speech';
 import type { Category } from '@/types';
 
 export function SettingsPage() {
@@ -51,6 +65,61 @@ export function SettingsPage() {
   const [showCatForm, setShowCatForm] = useState(false);
   const [editingCat, setEditingCat] = useState<Category | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
+
+  // --- Réglages Agent IA ---
+  const [keyInput, setKeyInput] = useState('');
+  const [model, setModelState] = useState(DEFAULT_MODEL);
+  const [voiceOn, setVoiceOn] = useState(false);
+  const [ttsOn, setTtsOn] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const sttSupported = isSTTSupported();
+  const ttsSupported = isTTSSupported();
+
+  // Charge les réglages agent au montage.
+  useEffect(() => {
+    (async () => {
+      const k = await getSetting('geminiKey');
+      if (k) setKeyInput(k);
+      const m = await getSetting('geminiModel');
+      setModelState(m ?? DEFAULT_MODEL);
+      setVoiceOn((await getSetting('voiceEnabled')) ?? false);
+      setTtsOn((await getSetting('ttsEnabled')) ?? false);
+    })();
+  }, []);
+
+  async function saveKey() {
+    const trimmed = keyInput.trim();
+    await setSetting('geminiKey', trimmed);
+    setApiKey(trimmed);
+    toast(trimmed ? 'Clé Gemini enregistrée ✓' : 'Clé Gemini effacée.', trimmed ? 'success' : 'info');
+  }
+
+  async function tryKey() {
+    if (!keyInput.trim()) {
+      toast('Saisissez d\'abord une clé.', 'warning');
+      return;
+    }
+    setTesting(true);
+    const result = await testApiKey(keyInput.trim(), model);
+    setTesting(false);
+    if (result.ok) toast('Clé valide ✓', 'success');
+    else toast(`Clé invalide : ${result.message}`, 'error');
+  }
+
+  async function changeModel(m: string) {
+    setModelState(m);
+    await setSetting('geminiModel', m);
+    setModel(m);
+  }
+
+  async function toggleVoice(on: boolean) {
+    setVoiceOn(on);
+    await setSetting('voiceEnabled', on);
+  }
+  async function toggleTts(on: boolean) {
+    setTtsOn(on);
+    await setSetting('ttsEnabled', on);
+  }
 
   const customCats = categories.filter((c) => !c.isDefault);
 
@@ -105,6 +174,81 @@ export function SettingsPage() {
                 {opt.label}
               </button>
             ))}
+          </div>
+        </section>
+
+        {/* Agent IA */}
+        <section className="card p-5">
+          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-500">
+            <Sparkles size={15} /> Agent IA
+          </h2>
+
+          <Field
+            label="Clé API Google Gemini"
+            hint="Gratuite sur Google AI Studio (aistudio.google.com/apikey). ⚠️ Stockée en clair dans le navigateur (PWA) — clé gratuite uniquement, jamais de clé payante."
+          >
+            <input
+              type="password"
+              className="input font-mono"
+              placeholder="AIza..."
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+            />
+          </Field>
+
+          <div className="mt-3 flex gap-2">
+            <button className="btn-primary flex-1" onClick={saveKey}>
+              Enregistrer
+            </button>
+            <button
+              className="btn-secondary flex-1"
+              onClick={tryKey}
+              disabled={testing}
+            >
+              {testing ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                'Tester la clé'
+              )}
+            </button>
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            {hasApiKey() ? 'Clé active.' : 'Aucune clé configurée.'}
+          </p>
+
+          <div className="mt-4">
+            <Field label="Modèle">
+              <select
+                className="input"
+                value={model}
+                onChange={(e) => void changeModel(e.target.value)}
+              >
+                {AVAILABLE_MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label} — {m.hint}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+
+          <div className="mt-4 space-y-1 border-t border-slate-100 pt-3 dark:border-slate-800">
+            <ToggleRow
+              icon={<Mic size={16} />}
+              label="Saisie vocale"
+              description={sttSupported ? 'Reconnaissance vocale (FR)' : 'Non supporté par ce navigateur'}
+              checked={voiceOn}
+              disabled={!sttSupported}
+              onChange={(v) => void toggleVoice(v)}
+            />
+            <ToggleRow
+              icon={<Volume2 size={16} />}
+              label="Lire les réponses"
+              description={ttsSupported ? "Synthèse vocale des réponses de l'agent" : 'Non supporté par ce navigateur'}
+              checked={ttsOn}
+              disabled={!ttsSupported}
+              onChange={(v) => void toggleTts(v)}
+            />
           </div>
         </section>
 
@@ -376,3 +520,52 @@ function CategoryForm({
     </Modal>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Ligne de réglage avec interrupteur (toggle) — utilisé pour la voix.
+// ---------------------------------------------------------------------------
+
+function ToggleRow({
+  icon,
+  label,
+  description,
+  checked,
+  disabled,
+  onChange,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between py-2.5">
+      <div className="flex items-center gap-3">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+          {icon}
+        </div>
+        <div>
+          <p className="text-sm font-medium">{label}</p>
+          <p className="text-xs text-slate-400">{description}</p>
+        </div>
+      </div>
+      <button
+        onClick={() => !disabled && onChange(!checked)}
+        disabled={disabled}
+        className={`relative h-6 w-11 rounded-full transition-colors disabled:opacity-40 ${
+          checked ? 'bg-brand-600' : 'bg-slate-300 dark:bg-slate-700'
+        }`}
+        aria-pressed={checked}
+      >
+        <span
+          className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
+            checked ? 'translate-x-[22px]' : 'translate-x-0.5'
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
+

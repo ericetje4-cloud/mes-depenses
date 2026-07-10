@@ -12,6 +12,7 @@ import {
   Settings,
   RefreshCw,
   WifiOff,
+  Sparkles,
 } from 'lucide-react';
 import { Icon } from './Icon';
 import { useNavigation, type Route } from '@/hooks/useNavigation';
@@ -21,8 +22,9 @@ import { useSyncExternalStore } from 'react';
 
 const NAV_ITEMS: { route: Route; label: string; icon: typeof Plus }[] = [
   { route: 'dashboard', label: 'Accueil', icon: LayoutDashboard },
-  { route: 'add', label: 'Ajouter', icon: Plus },
   { route: 'history', label: 'Historique', icon: History },
+  { route: 'add', label: 'Ajouter', icon: Plus },
+  { route: 'agent', label: 'Agent', icon: Sparkles },
   { route: 'budgets', label: 'Budgets', icon: PiggyBank },
   { route: 'settings', label: 'Réglages', icon: Settings },
 ];

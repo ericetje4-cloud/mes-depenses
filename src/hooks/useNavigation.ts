@@ -11,9 +11,10 @@ export type Route =
   | 'history'
   | 'budgets'
   | 'recurring'
+  | 'agent'
   | 'settings';
 
-const ROUTES: Route[] = ['dashboard', 'add', 'history', 'budgets', 'recurring', 'settings'];
+const ROUTES: Route[] = ['dashboard', 'add', 'history', 'budgets', 'recurring', 'agent', 'settings'];
 const DEFAULT_ROUTE: Route = 'dashboard';
 
 function parseHash(): Route {

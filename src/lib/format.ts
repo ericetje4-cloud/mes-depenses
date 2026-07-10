@@ -146,3 +146,25 @@ export function isThisMonth(iso: string): boolean {
 function pad2(n: number): string {
   return String(n).padStart(2, '0');
 }
+
+// ---------------------------------------------------------------------------
+// Formatage agent (conversation)
+// ---------------------------------------------------------------------------
+
+const TIME_FMT = new Intl.DateTimeFormat('fr-FR', {
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+/** Formate un horodatage (ms epoch) en "14:05". */
+export function formatTime(ms: number): string {
+  return TIME_FMT.format(new Date(ms));
+}
+
+/** Formate une taille de fichier en octets/Ko/Mo. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+}
+

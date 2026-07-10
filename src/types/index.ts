@@ -23,7 +23,7 @@ export interface Category {
 }
 
 /** Origine d'une transaction. */
-export type TransactionSource = 'scan' | 'manual';
+export type TransactionSource = 'scan' | 'manual' | 'agent';
 
 /** Une dépense (toujours un débit, montant > 0). */
 export interface Transaction {
@@ -76,7 +76,11 @@ export interface Budget {
 export type SettingKey =
   | 'theme' // 'light' | 'dark' | 'system'
   | 'currency' // 'EUR' | 'USD' | ...
-  | 'hasCompletedOnboarding';
+  | 'hasCompletedOnboarding'
+  | 'geminiKey' // clé API Gemini (saisie utilisateur, '' = absent)
+  | 'geminiModel' // identifiant du modèle Gemini
+  | 'voiceEnabled' // saisie vocale (STT) activée
+  | 'ttsEnabled'; // lecture vocale des réponses (TTS)
 
 /** Paramètres applicatifs (magasin key-value). */
 export interface Setting<K extends SettingKey = SettingKey> {
@@ -90,6 +94,10 @@ export interface SettingValueMap {
   theme: 'light' | 'dark' | 'system';
   currency: string;
   hasCompletedOnboarding: boolean;
+  geminiKey: string;
+  geminiModel: string;
+  voiceEnabled: boolean;
+  ttsEnabled: boolean;
 }
 export type SettingValue<K extends SettingKey> = SettingValueMap[K];
 
@@ -124,3 +132,67 @@ export interface RecurringExpense {
   nextDate: string;
   lastDate: string;
 }
+
+// ---------------------------------------------------------------------------
+// AGENT CONVERSATIONNEL (multimodal + boucle ReAct)
+// ---------------------------------------------------------------------------
+
+/** Nature d'une pièce jointe envoyée à l'agent. */
+export type AttachmentKind = 'image' | 'audio' | 'pdf' | 'docx' | 'text';
+
+/** Une pièce jointe à un message. */
+export interface Attachment {
+  id: string;
+  kind: AttachmentKind;
+  /** Nom de fichier d'origine (pour l'affichage). */
+  name: string;
+  /** Type MIME. */
+  mime: string;
+  /**
+   * Contenu à envoyer au modèle : pour image/audio/pdf → data-URL (base64).
+   * Pour docx/text → texte extrait (chaîne).
+   */
+  data: string;
+  /** Taille en octets (pour l'affichage). */
+  size: number;
+  /** Vignette optionnelle (data-URL) pour l'aperçu image. */
+  thumbnail?: string;
+}
+
+/** Rôle d'un message dans la conversation. */
+export type ChatRole = 'user' | 'model';
+
+/**
+ * Étape de raisonnement produite par la boucle ReAct.
+ * ReAct = Thought → Action → Observation, répété jusqu'à la réponse finale.
+ */
+export interface AgentStep {
+  type: 'thought' | 'action' | 'observation' | 'answer';
+  /** Nom du tool appelé (type === 'action' / 'observation'). */
+  toolName?: string;
+  /** Arguments du tool (type === 'action'). */
+  args?: Record<string, unknown>;
+  /** Résultat renvoyé par le tool (type === 'observation'). */
+  result?: string;
+  /** Texte de réflexion ou de réponse finale. */
+  text?: string;
+}
+
+/** Un message de la conversation avec l'agent. */
+export interface ChatMessage {
+  id: string;
+  role: ChatRole;
+  /** Horodatage de création (ms epoch). */
+  createdAt: number;
+  /** Pièces jointes (côté user uniquement). */
+  attachments?: Attachment[];
+  /** Texte du message (côté user) ou réponse finale (côté model). */
+  text?: string;
+  /** Trace ReAct associée à ce message model (étapes intermédiaires). */
+  steps?: AgentStep[];
+  /** true si la génération est en cours. */
+  pending?: boolean;
+  /** Message d'erreur éventuel. */
+  error?: string;
+}
+

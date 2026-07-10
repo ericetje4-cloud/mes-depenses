@@ -39,3 +39,8 @@ pnpm-debug.log*
 .zcode/
 qr.html
 public/qr.html
+
+# Projet tiers présent localement (ne fait pas partie de Mes Dépenses)
+Robot trading/
+.env
+.env.*

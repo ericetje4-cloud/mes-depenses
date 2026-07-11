@@ -162,9 +162,11 @@ export function AddPage() {
         toast(`Analyse impossible (${reason}). Saisie manuelle.`, 'warning');
       }
     } catch (err) {
-      // Erreur fatale (ex: compression). On bascule en manuel.
-      console.error(err);
-      toast('Échec du scan. Saisie manuelle possible.', 'error');
+      // Erreur fatale (compression, lecture fichier…). On bascule en manuel.
+      // On affiche la cause technique pour diagnostiquer le problème.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[scan] erreur fatale :', err);
+      toast(`Échec du scan (${msg}). Saisie manuelle possible.`, 'error');
       setSource('manual');
       setStep('review');
     }

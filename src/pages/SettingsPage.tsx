@@ -23,6 +23,7 @@ import {
   Volume2,
   Loader2,
   RefreshCw,
+  Share2,
 } from 'lucide-react';
 import {
   useStore,
@@ -125,6 +126,38 @@ export function SettingsPage() {
   }
 
   const customCats = categories.filter((c) => !c.isDefault);
+
+  // Partage de l'app via la feuille de partage native du téléphone.
+  // Repli : copie du message dans le presse-papier (ordinateur).
+  async function shareApp() {
+    const text =
+      'Mes Dépenses — suivi de dépenses avec assistant IA (photo de tickets) 📸\n' +
+      'Gratuit, sans pub, hors-ligne. Installe-la sur ton téléphone :\n' +
+      'https://ericetje4-cloud.github.io/mes-depenses/\n\n' +
+      'Pour l\'assistant IA, crée une clé Gemini gratuite (2 min) :\n' +
+      'https://aistudio.google.com/apikey puis colle-la dans Réglages → Agent IA.';
+    const shareData = { title: 'Mes Dépenses', text, url: 'https://ericetje4-cloud.github.io/mes-depenses/' };
+
+    // Tentative avec la Web Share API (mobile principalement).
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      try {
+        await navigator.share(shareData);
+        return; // Succès (ou utilisateur a annulé) : on sort.
+      } catch {
+        // Annulation par l'utilisateur (AbortError) — on ne fait rien.
+        return;
+      }
+    }
+
+    // Repli : copier dans le presse-papier.
+    try {
+      await navigator.clipboard.writeText(`${text}\n${shareData.url}`);
+      toast('Message copié ✓ Colle-le dans WhatsApp/SMS/mail.', 'success');
+    } catch {
+      toast('Copie impossible. Retiens le lien et partage-le manuellement.', 'error');
+    }
+  }
+
 
   async function handleExport() {
     const payload = await exportStore();
@@ -394,6 +427,13 @@ export function SettingsPage() {
               <dd className="font-medium">React 19 · PWA · IndexedDB</dd>
             </div>
           </dl>
+
+          <button
+            onClick={() => void shareApp()}
+            className="btn-primary mt-4 w-full"
+          >
+            <Share2 size={16} /> Partager l'application
+          </button>
         </section>
       </div>
 

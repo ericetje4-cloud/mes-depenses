@@ -420,7 +420,7 @@ export function SettingsPage() {
             </div>
             <div className="flex justify-between">
               <dt className="text-slate-500">Version</dt>
-              <dd className="font-medium">0.1.0</dd>
+              <dd className="font-medium">{__APP_VERSION__}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-slate-500">Technologie</dt>

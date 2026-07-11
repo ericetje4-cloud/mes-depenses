@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
+import pkg from './package.json' with { type: 'json' };
 
 // Base path : pour GitHub Pages (servi sous /<repo>/), définir
 // VITE_BASE_PATH=/nom-du-repo. Vide par défaut (déploiement racine).
@@ -11,6 +12,11 @@ const baseDir = base.endsWith('/') ? base : `${base}/`;
 // https://vite.dev/config/
 export default defineConfig({
   base,
+
+  // Injecte la version (de package.json) comme constante globale côté client.
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
 
   // Autorise l'accès depuis un tunnel (cloudflared, ngrok...) pour tester la
   // PWA sur mobile en HTTPS. true = accepte tous les hôtes (dev/preview only).

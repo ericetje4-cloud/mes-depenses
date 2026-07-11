@@ -9,7 +9,7 @@
 //     (pas de texte), le PDF reste envoyé nativement à Gemini par l'agent.
 // ===========================================================================
 
-import { blobToDataURL } from '@/lib/image';
+import { blobToDataURL, compressImage } from '@/lib/image';
 import type { Attachment } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -190,7 +190,23 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
     };
   }
 
-  // Image / audio : data-URL brute.
+  // Image : compression avant envoi (les photos natives de mobile peuvent
+  // dépasser la limite inlineData de Gemini et faire échouer la requête).
+  // Audio : data-URL brute (pas de compression audio native).
+  if (kind === 'image') {
+    const compressed = await compressImage(file, { maxWidth: 1280, quality: 0.85 });
+    return {
+      id,
+      kind,
+      name: file.name,
+      mime: 'image/jpeg',
+      data: compressed,
+      size: file.size,
+      thumbnail: compressed,
+    };
+  }
+
+  // Audio : data-URL brute.
   const dataUrl = await blobToDataURL(file);
   return {
     id,
@@ -199,6 +215,5 @@ export async function fileToAttachment(file: File): Promise<Attachment> {
     mime: file.type,
     data: dataUrl,
     size: file.size,
-    thumbnail: kind === 'image' ? dataUrl : undefined,
   };
 }

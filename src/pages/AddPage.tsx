@@ -1,7 +1,9 @@
 // ===========================================================================
-// Page Ajout : scan OCR de ticket + ajout manuel rapide.
-// Pipeline : capture/upload → compression → OCR Tesseract → parser regex
-//            → formulaire pré-rempli (éditable) → validation → IndexedDB.
+// Page Ajout : scan de ticket (IA Gemini prioritaire, OCR local en repli) +
+// ajout manuel rapide.
+// Pipeline : capture/upload → compression →
+//            [clé Gemini ? IA vision : OCR Tesseract + parser regex] →
+//            formulaire pré-rempli (éditable) → validation → IndexedDB.
 // ===========================================================================
 
 import { useEffect, useRef, useState } from 'react';
@@ -22,6 +24,8 @@ import { Field, useToast } from '@/components/ui';
 import { parseReceipt, type ParsedReceipt } from '@/lib/parser';
 import { recognizeImage, isOCRSupported, type OCRProgress } from '@/lib/ocr';
 import { compressImage } from '@/lib/image';
+import { extractReceiptWithAI } from '@/lib/ai-receipt';
+import { hasApiKey } from '@/lib/gemini';
 import { formatEUR, parseISO, todayISO } from '@/lib/format';
 import type { TransactionSource } from '@/types';
 
@@ -55,41 +59,83 @@ export function AddPage() {
     if (suggested) setCategoryId(suggested);
   }, [merchant, categoryId]);
 
-  /** Gère un fichier image (caméra ou galerie) : OCR complet. */
+  /** Gère un fichier image (caméra ou galerie) : analyse IA prioritaire, OCR en repli. */
   async function handleImage(file: File) {
-    if (!isOCRSupported()) {
-      toast('L\'OCR n\'est pas supporté sur ce navigateur.', 'warning');
-      return;
-    }
     setStep('scanning');
     setOcrProgress({ progress: 0, status: 'démarrage' });
 
     try {
-      // 1. Compression + pré-traitement (grayscale pour meilleure OCR).
+      // 1. Compression en couleur (maxWidth 1280). La couleur aide Gemini ;
+      //    Tesseract convertit lui-même en niveaux de gris en interne.
       const compressed = await compressImage(file, {
         maxWidth: 1280,
-        grayscale: true,
-        quality: 0.8,
+        quality: 0.85,
       });
       setImageData(compressed);
       setSource('scan');
 
-      // 2. OCR local Tesseract.
-      const ocrResult = await recognizeImage(compressed, (p) =>
-        setOcrProgress(p),
-      );
+      // 2. Tentative d'extraction via Gemini (si clé configurée).
+      let result: ParsedReceipt | null = null;
+      let usedAI = false;
 
-      // 3. Parser regex.
-      const result = parseReceipt(ocrResult.text);
+      if (hasApiKey()) {
+        setOcrProgress({ progress: 0.3, status: 'Analyse IA du ticket…' });
+        try {
+          result = await extractReceiptWithAI(compressed);
+          usedAI = true;
+        } catch (err) {
+          // L'IA a échoué : on bascule sur l'OCR local silencieusement.
+          console.warn('[scan] IA échouée, repli OCR', err);
+        }
+      }
+
+      // 3. Repli : OCR local Tesseract (si pas de clé, IA échouée, ou IA vide).
+      const aiEmpty =
+        result &&
+        !result.merchant &&
+        result.total == null &&
+        !result.date;
+
+      if ((!result || aiEmpty) && isOCRSupported()) {
+        setOcrProgress({ progress: 0.4, status: 'Analyse OCR du ticket…' });
+        const ocrResult = await recognizeImage(compressed, (p) =>
+          setOcrProgress(p),
+        );
+        const ocrParsed = parseReceipt(ocrResult.text);
+        // On garde le meilleur des deux : si l'IA a trouvé certains champs et
+        // l'OCR d'autres, on fusionne (priorité IA).
+        result = {
+          merchant: result?.merchant ?? ocrParsed.merchant,
+          date: result?.date ?? ocrParsed.date,
+          total: result?.total ?? ocrParsed.total,
+          confidence: {
+            merchant: result?.merchant ? 1 : ocrParsed.confidence.merchant,
+            date: result?.date ? 1 : ocrParsed.confidence.date,
+            total: result?.total != null ? 1 : ocrParsed.confidence.total,
+          },
+          rawLines: ocrParsed.rawLines,
+        };
+      }
+
       setParsed(result);
 
-      // 4. Pré-remplit le formulaire.
-      if (result.merchant) setMerchant(result.merchant);
-      if (result.date) setDate(result.date);
-      if (result.total != null) setAmount(String(result.total).replace('.', ','));
+      // 4. Pré-remplit le formulaire avec les champs extraits.
+      if (result?.merchant) setMerchant(result.merchant);
+      if (result?.date) setDate(result.date);
+      if (result?.total != null) setAmount(String(result.total).replace('.', ','));
 
       setStep('review');
-      toast('Ticket analysé ! Vérifiez les champs.', 'success');
+
+      // Toast adapté au résultat.
+      const foundSomething = result?.merchant || result?.total != null || result?.date;
+      if (foundSomething) {
+        toast(
+          usedAI ? 'Ticket analysé par IA ✓' : 'Ticket analysé ✓',
+          'success',
+        );
+      } else {
+        toast('Analyse incomplète. Saisie manuelle.', 'warning');
+      }
     } catch (err) {
       console.error(err);
       toast('Échec du scan. Saisie manuelle possible.', 'error');

@@ -64,9 +64,17 @@ export function AddPage() {
     setStep('scanning');
     setOcrProgress({ progress: 0, status: 'démarrage' });
 
+    // Variables accumulant le résultat des deux pipelines (IA + OCR).
+    let merchant: string | undefined;
+    let total: number | undefined;
+    let date: string | undefined;
+    let usedAI = false;
+    let aiError: string | undefined;
+    let ocrError: string | undefined;
+    let rawLines: string[] = [];
+
     try {
-      // 1. Compression en couleur (maxWidth 1280). La couleur aide Gemini ;
-      //    Tesseract convertit lui-même en niveaux de gris en interne.
+      // 1. Compression en couleur (maxWidth 1280).
       const compressed = await compressImage(file, {
         maxWidth: 1280,
         quality: 0.85,
@@ -75,76 +83,86 @@ export function AddPage() {
       setSource('scan');
 
       // 2. Tentative d'extraction via Gemini (si clé configurée).
-      let result: ParsedReceipt | null = null;
-      let usedAI = false;
-
       if (hasApiKey()) {
         setOcrProgress({ progress: 0.3, status: 'Analyse IA du ticket…' });
         try {
-          result = await extractReceiptWithAI(compressed);
-          usedAI = true;
+          const aiResult = await extractReceiptWithAI(compressed);
+          merchant = aiResult.merchant;
+          total = aiResult.total;
+          date = aiResult.date;
+          usedAI = Boolean(merchant || total || date);
         } catch (err) {
-          // L'IA a échoué : on bascule sur l'OCR local silencieusement.
-          console.warn('[scan] IA échouée, repli OCR', err);
+          aiError = (err as Error).message;
+          console.warn('[scan] IA échouée :', aiError);
         }
       }
 
-      // 3. Repli : OCR local Tesseract (si pas de clé, IA échouée, ou IA vide).
-      const aiEmpty =
-        result &&
-        !result.merchant &&
-        result.total == null &&
-        !result.date;
-
-      if ((!result || aiEmpty) && isOCRSupported()) {
+      // 3. Repli OCR : si l'IA n'a rien trouvé (ou pas de clé), on tente
+      //    l'OCR local. Bloc isolé pour ne jamais planter le pipeline.
+      const needOCR =
+        (!merchant && total == null && !date) || !hasApiKey();
+      if (needOCR && isOCRSupported()) {
         setOcrProgress({ progress: 0.4, status: 'Analyse OCR du ticket…' });
-        const ocrResult = await recognizeImage(compressed, (p) =>
-          setOcrProgress(p),
-        );
-        const ocrParsed = parseReceipt(ocrResult.text);
-        // On garde le meilleur des deux : si l'IA a trouvé certains champs et
-        // l'OCR d'autres, on fusionne (priorité IA).
-        result = {
-          merchant: result?.merchant ?? ocrParsed.merchant,
-          date: result?.date ?? ocrParsed.date,
-          total: result?.total ?? ocrParsed.total,
-          confidence: {
-            merchant: result?.merchant ? 1 : ocrParsed.confidence.merchant,
-            date: result?.date ? 1 : ocrParsed.confidence.date,
-            total: result?.total != null ? 1 : ocrParsed.confidence.total,
-          },
-          rawLines: ocrParsed.rawLines,
-        };
+        try {
+          const ocrResult = await recognizeImage(compressed, (p) =>
+            setOcrProgress(p),
+          );
+          const ocrParsed = parseReceipt(ocrResult.text);
+          rawLines = ocrParsed.rawLines;
+          // On comble les champs manquants (priorité IA si déjà trouvé).
+          merchant = merchant ?? ocrParsed.merchant;
+          date = date ?? ocrParsed.date;
+          total = total ?? ocrParsed.total;
+        } catch (err) {
+          ocrError = (err as Error).message;
+          console.warn('[scan] OCR échoué :', ocrError);
+        }
       }
 
+      // 4. Construit le ParsedReceipt final (fusion).
+      const result: ParsedReceipt = {
+        merchant,
+        date,
+        total,
+        confidence: {
+          merchant: merchant ? 1 : 0,
+          date: date ? 1 : 0,
+          total: total != null ? 1 : 0,
+        },
+        rawLines,
+      };
       setParsed(result);
 
-      // 4. Pré-remplit le formulaire avec les champs extraits.
-      if (result?.merchant) setMerchant(result.merchant);
-      if (result?.date) setDate(result.date);
-      if (result?.total != null) setAmount(String(result.total).replace('.', ','));
+      // 5. Pré-remplit le formulaire.
+      if (merchant) setMerchant(merchant);
+      if (date) setDate(date);
+      if (total != null) setAmount(String(total).replace('.', ','));
 
       setStep('review');
 
-      // Toast adapté au résultat : indique précisément ce qui a été trouvé.
-      const foundCount = [result?.merchant, result?.total, result?.date].filter(
-        Boolean,
-      ).length;
+      // 6. Toast précis : indique ce qui a été trouvé OU la cause de l'échec.
+      const foundCount = [merchant, total, date].filter(Boolean).length;
       if (foundCount === 3) {
-        toast(
-          usedAI ? 'Ticket analysé par IA ✓' : 'Ticket analysé ✓',
-          'success',
-        );
+        toast(usedAI ? 'Ticket analysé par IA ✓' : 'Ticket analysé ✓', 'success');
       } else if (foundCount > 0) {
         const parts: string[] = [];
-        if (result?.merchant) parts.push('marchand');
-        if (result?.total != null) parts.push('montant');
-        if (result?.date) parts.push('date');
+        if (merchant) parts.push('marchand');
+        if (total != null) parts.push('montant');
+        if (date) parts.push('date');
         toast(`Analyse partielle : ${parts.join(', ')}.`, 'warning');
       } else {
-        toast('Analyse incomplète. Saisie manuelle.', 'warning');
+        // Rien trouvé : on explique pourquoi pour aider au diagnostic.
+        const reason = aiError
+          ? `IA : ${aiError}`
+          : ocrError
+            ? `OCR : ${ocrError}`
+            : !hasApiKey()
+              ? 'aucune clé API'
+              : 'texte illisible';
+        toast(`Analyse impossible (${reason}). Saisie manuelle.`, 'warning');
       }
     } catch (err) {
+      // Erreur fatale (ex: compression). On bascule en manuel.
       console.error(err);
       toast('Échec du scan. Saisie manuelle possible.', 'error');
       setSource('manual');

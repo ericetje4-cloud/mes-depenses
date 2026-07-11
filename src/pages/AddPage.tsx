@@ -25,7 +25,8 @@ import { parseReceipt, type ParsedReceipt } from '@/lib/parser';
 import { recognizeImage, isOCRSupported, type OCRProgress } from '@/lib/ocr';
 import { compressImage } from '@/lib/image';
 import { extractReceiptWithAI } from '@/lib/ai-receipt';
-import { hasApiKey } from '@/lib/gemini';
+import { hasApiKey, setApiKey, setModel, DEFAULT_MODEL } from '@/lib/gemini';
+import { getSetting } from '@/lib/db';
 import { formatEUR, parseISO, todayISO } from '@/lib/format';
 import type { TransactionSource } from '@/types';
 
@@ -74,6 +75,12 @@ export function AddPage() {
       console.log('[scan]', line);
       setScanLog((prev) => [...prev, line]);
     };
+    // Extrait un message d'erreur safe (err peut être undefined ou non-Error).
+    const errMsg = (e: unknown): string => {
+      if (!e) return 'erreur inconnue';
+      if (e instanceof Error) return e.message;
+      return String(e);
+    };
 
     // Variables accumulant le résultat des deux pipelines (IA + OCR).
     let merchant: string | undefined;
@@ -85,7 +92,18 @@ export function AddPage() {
     let rawLines: string[] = [];
 
     try {
-      // 0. Diagnostic initial : clé API présente ?
+      // 0. Recharge la clé Gemini depuis IndexedDB (au cas où elle n'est pas
+      //    en mémoire — ex: navigation privée, reload intempestif).
+      try {
+        const savedKey = (await getSetting('geminiKey')) ?? '';
+        if (savedKey) setApiKey(savedKey);
+        const savedModel = (await getSetting('geminiModel')) ?? DEFAULT_MODEL;
+        setModel(savedModel);
+      } catch {
+        /* IndexedDB peut échouer en navigation privée — on continue */
+      }
+
+      // Diagnostic initial : clé API présente ?
       log(`Clé API Gemini : ${hasApiKey() ? 'oui' : 'non'}`);
 
       // 1. Compression en couleur (maxWidth 1280).
@@ -110,7 +128,7 @@ export function AddPage() {
           usedAI = Boolean(merchant || total || date);
           log(`IA résultat : marchand=${merchant ?? '—'}, total=${total ?? '—'}, date=${date ?? '—'}`);
         } catch (err) {
-          aiError = (err as Error).message;
+          aiError = errMsg(err);
           log(`IA échouée : ${aiError}`);
         }
       } else {
@@ -136,7 +154,7 @@ export function AddPage() {
           total = total ?? ocrParsed.total;
           log(`OCR résultat : marchand=${ocrParsed.merchant ?? '—'}, total=${ocrParsed.total ?? '—'}, date=${ocrParsed.date ?? '—'}`);
         } catch (err) {
-          ocrError = (err as Error).message;
+          ocrError = errMsg(err);
           log(`OCR échoué : ${ocrError}`);
         }
       } else if (needOCR && !isOCRSupported()) {
@@ -175,7 +193,7 @@ export function AddPage() {
       }
     } catch (err) {
       // Erreur fatale (compression, lecture fichier…). On bascule en manuel.
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errMsg(err);
       console.error('[scan] erreur fatale :', err);
       log(`ERREUR FATALE : ${msg}`);
       setScanError(msg);

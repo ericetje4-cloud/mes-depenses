@@ -126,13 +126,21 @@ export function AddPage() {
 
       setStep('review');
 
-      // Toast adapté au résultat.
-      const foundSomething = result?.merchant || result?.total != null || result?.date;
-      if (foundSomething) {
+      // Toast adapté au résultat : indique précisément ce qui a été trouvé.
+      const foundCount = [result?.merchant, result?.total, result?.date].filter(
+        Boolean,
+      ).length;
+      if (foundCount === 3) {
         toast(
           usedAI ? 'Ticket analysé par IA ✓' : 'Ticket analysé ✓',
           'success',
         );
+      } else if (foundCount > 0) {
+        const parts: string[] = [];
+        if (result?.merchant) parts.push('marchand');
+        if (result?.total != null) parts.push('montant');
+        if (result?.date) parts.push('date');
+        toast(`Analyse partielle : ${parts.join(', ')}.`, 'warning');
       } else {
         toast('Analyse incomplète. Saisie manuelle.', 'warning');
       }

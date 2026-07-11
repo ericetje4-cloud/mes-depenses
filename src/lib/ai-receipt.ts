@@ -18,21 +18,56 @@ import { getSetting } from '@/lib/db';
 import { setApiKey, setModel, DEFAULT_MODEL } from '@/lib/gemini';
 import type { ParsedReceipt } from '@/lib/parser';
 
-// Schéma JSON attendu en sortie de Gemini (documenté dans le prompt).
-interface AIReceiptResult {
-  merchant?: string;
-  total?: number;
-  date?: string; // AAAA-MM-JJ
+/** Prompt system : rôle + consignes d'extraction. */
+const SYSTEM_PROMPT = `Tu es un extracteur automatique de tickets de caisse et factures. Tu reçois l'image d'un reçu et tu DOIS extraire ces trois champs obligatoirement, même si c'est approximatif :
+- "merchant" : le nom de l'enseigne, du magasin ou du commerçant (texte court, sans adresse ni téléphone)
+- "total" : le montant TOTAL à payer (un NOMBRE décimal en euros, sans le symbole € ni le mot "euros" — ex: 24.90 et PAS "24,90 €" ni "24,90")
+- "date" : la date d'achat au format AAAA-MM-JJ (si l'année n'est pas visible, utilise 2026)
+
+IMPORTANT :
+- "total" doit être un nombre, pas une chaîne. Utilise un point comme séparateur décimal (24.90).
+- Réponds UNIQUEMENT avec un objet JSON. Aucun texte avant ou après.
+- Même si le ticket est partiellement illisible, fais de ton mieux pour remplir tous les champs.
+
+Format de réponse attendu :
+{"merchant":"Carrefour","total":24.90,"date":"2026-07-12"}`;
+
+/**
+ * Normalise un montant : accepte number, string avec virgule ou point,
+ * symbole €, espaces. Retourne un number ou undefined.
+ */
+function normalizeTotal(v: unknown): number | undefined {
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+    return Math.round(v * 100) / 100;
+  }
+  if (typeof v === 'string') {
+    // Retire tout sauf chiffres, point et virgule ; remplace virgule par point.
+    const cleaned = v.replace(/[^\d.,-]/g, '').replace(',', '.');
+    const n = parseFloat(cleaned);
+    if (Number.isFinite(n) && n > 0) return Math.round(n * 100) / 100;
+  }
+  return undefined;
 }
 
-/** Prompt system : rôle + consignes d'extraction. */
-const SYSTEM_PROMPT = `Tu es un extracteur de tickets de caisse. Analyse l'image du reçu fournie et extrais ces champs :
-- "merchant" : nom du commerçant/enseigne (texte court, sans adresse ni téléphone)
-- "total" : montant TOTAL à payer (nombre décimal en euros, ex: 24.90 — sans le symbole € ni la devise)
-- "date" : date d'achat au format AAAA-MM-JJ (déduis l'année si absente ; si introuvable, omet le champ)
+/** Normalise une date : accepte AAAA-MM-JJ, JJ/MM/AAAA, JJ-MM-AAAA. */
+function normalizeDate(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  // Format ISO déjà correct.
+  let m = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  // Format JJ/MM/AAAA.
+  m = v.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})/);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  return undefined;
+}
 
-Réponds UNIQUEMENT avec un objet JSON valide, rien d'autre. Si un champ est illisible ou absent, ne l'inclus pas.
-Exemple : {"merchant":"Carrefour","total":24.90,"date":"2026-07-12"}`;
+/** Récupère une valeur depuis un objet en essayant plusieurs clés. */
+function pick(obj: Record<string, unknown>, keys: string[]): unknown {
+  for (const k of keys) {
+    if (obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k];
+  }
+  return undefined;
+}
 
 /**
  * Extrait les informations d'un ticket de caisse depuis une image via Gemini.
@@ -68,7 +103,7 @@ export async function extractReceiptWithAI(
         role: 'user',
         parts: [
           { inlineData: inline },
-          { text: 'Extrails les informations de ce ticket.' },
+          { text: 'Extrails le marchand, le montant total et la date de ce ticket. Réponds en JSON.' },
         ],
       },
     ],
@@ -84,6 +119,8 @@ export async function extractReceiptWithAI(
     .join('')
     .trim() ?? '';
 
+  console.debug('[ai-receipt] réponse brute de Gemini :', rawText);
+
   if (!rawText) {
     throw new Error('Gemini n\'a renvoyé aucun texte.');
   }
@@ -94,26 +131,27 @@ export async function extractReceiptWithAI(
     .replace(/\s*```$/i, '')
     .trim();
 
-  let parsed: AIReceiptResult;
+  let obj: Record<string, unknown>;
   try {
-    parsed = JSON.parse(cleaned) as AIReceiptResult;
+    obj = JSON.parse(cleaned) as Record<string, unknown>;
   } catch {
     throw new Error('Réponse Gemini illisible (JSON invalide).');
   }
 
-  // Construit le ParsedReceipt avec indices de confiance binaires.
+  // Accepte les clés françaises ET anglaises (le modèle peut varier).
+  const merchantRaw = pick(obj, ['merchant', 'marchand', 'enseigne', 'commercant', 'shop', 'store', 'name']);
   const merchant =
-    typeof parsed.merchant === 'string' && parsed.merchant.trim()
-      ? parsed.merchant.trim()
+    typeof merchantRaw === 'string' && merchantRaw.trim()
+      ? merchantRaw.trim()
       : undefined;
-  const total =
-    typeof parsed.total === 'number' && Number.isFinite(parsed.total) && parsed.total > 0
-      ? Math.round(parsed.total * 100) / 100
-      : undefined;
-  const date =
-    typeof parsed.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date)
-      ? parsed.date
-      : undefined;
+
+  const totalRaw = pick(obj, ['total', 'montant', 'montant_total', 'total_ttc', 'amount', 'prix', 'sum']);
+  const total = normalizeTotal(totalRaw);
+
+  const dateRaw = pick(obj, ['date', 'date_achat', 'jour', 'purchase_date']);
+  const date = normalizeDate(dateRaw);
+
+  console.debug('[ai-receipt] extraction :', { merchant, total, date });
 
   return {
     merchant,

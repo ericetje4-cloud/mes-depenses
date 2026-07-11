@@ -39,6 +39,9 @@ export function AddPage() {
   const [ocrProgress, setOcrProgress] = useState<OCRProgress | null>(null);
   const [parsed, setParsed] = useState<ParsedReceipt | null>(null);
   const [imageData, setImageData] = useState<string | undefined>();
+  // Diagnostic visible dans la page (pas un toast éphémère).
+  const [scanLog, setScanLog] = useState<string[]>([]);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   // Champs du formulaire (pré-remplis après scan, ou vides pour ajout manuel).
   const [merchant, setMerchant] = useState('');
@@ -63,6 +66,14 @@ export function AddPage() {
   async function handleImage(file: File) {
     setStep('scanning');
     setOcrProgress({ progress: 0, status: 'démarrage' });
+    setScanLog([]);
+    setScanError(null);
+
+    // Helper local : ajoute une ligne au journal visible.
+    const log = (line: string) => {
+      console.log('[scan]', line);
+      setScanLog((prev) => [...prev, line]);
+    };
 
     // Variables accumulant le résultat des deux pipelines (IA + OCR).
     let merchant: string | undefined;
@@ -74,27 +85,36 @@ export function AddPage() {
     let rawLines: string[] = [];
 
     try {
+      // 0. Diagnostic initial : clé API présente ?
+      log(`Clé API Gemini : ${hasApiKey() ? 'oui' : 'non'}`);
+
       // 1. Compression en couleur (maxWidth 1280).
+      log('Compression de l\'image…');
       const compressed = await compressImage(file, {
         maxWidth: 1280,
         quality: 0.85,
       });
       setImageData(compressed);
       setSource('scan');
+      log('Image compressée ✓');
 
       // 2. Tentative d'extraction via Gemini (si clé configurée).
       if (hasApiKey()) {
         setOcrProgress({ progress: 0.3, status: 'Analyse IA du ticket…' });
+        log('Analyse IA (Gemini)…');
         try {
           const aiResult = await extractReceiptWithAI(compressed);
           merchant = aiResult.merchant;
           total = aiResult.total;
           date = aiResult.date;
           usedAI = Boolean(merchant || total || date);
+          log(`IA résultat : marchand=${merchant ?? '—'}, total=${total ?? '—'}, date=${date ?? '—'}`);
         } catch (err) {
           aiError = (err as Error).message;
-          console.warn('[scan] IA échouée :', aiError);
+          log(`IA échouée : ${aiError}`);
         }
+      } else {
+        log('Pas de clé API → OCR local uniquement');
       }
 
       // 3. Repli OCR : si l'IA n'a rien trouvé (ou pas de clé), on tente
@@ -103,6 +123,7 @@ export function AddPage() {
         (!merchant && total == null && !date) || !hasApiKey();
       if (needOCR && isOCRSupported()) {
         setOcrProgress({ progress: 0.4, status: 'Analyse OCR du ticket…' });
+        log('Analyse OCR (Tesseract)…');
         try {
           const ocrResult = await recognizeImage(compressed, (p) =>
             setOcrProgress(p),
@@ -113,10 +134,13 @@ export function AddPage() {
           merchant = merchant ?? ocrParsed.merchant;
           date = date ?? ocrParsed.date;
           total = total ?? ocrParsed.total;
+          log(`OCR résultat : marchand=${ocrParsed.merchant ?? '—'}, total=${ocrParsed.total ?? '—'}, date=${ocrParsed.date ?? '—'}`);
         } catch (err) {
           ocrError = (err as Error).message;
-          console.warn('[scan] OCR échoué :', ocrError);
+          log(`OCR échoué : ${ocrError}`);
         }
+      } else if (needOCR && !isOCRSupported()) {
+        log('OCR non supporté sur ce navigateur');
       }
 
       // 4. Construit le ParsedReceipt final (fusion).
@@ -140,33 +164,22 @@ export function AddPage() {
 
       setStep('review');
 
-      // 6. Toast précis : indique ce qui a été trouvé OU la cause de l'échec.
+      // 6. Toast indicatif (le détail est dans le journal visible).
       const foundCount = [merchant, total, date].filter(Boolean).length;
       if (foundCount === 3) {
         toast(usedAI ? 'Ticket analysé par IA ✓' : 'Ticket analysé ✓', 'success');
       } else if (foundCount > 0) {
-        const parts: string[] = [];
-        if (merchant) parts.push('marchand');
-        if (total != null) parts.push('montant');
-        if (date) parts.push('date');
-        toast(`Analyse partielle : ${parts.join(', ')}.`, 'warning');
+        toast('Analyse partielle — voir détails.', 'warning');
       } else {
-        // Rien trouvé : on explique pourquoi pour aider au diagnostic.
-        const reason = aiError
-          ? `IA : ${aiError}`
-          : ocrError
-            ? `OCR : ${ocrError}`
-            : !hasApiKey()
-              ? 'aucune clé API'
-              : 'texte illisible';
-        toast(`Analyse impossible (${reason}). Saisie manuelle.`, 'warning');
+        toast('Analyse impossible — voir détails.', 'warning');
       }
     } catch (err) {
       // Erreur fatale (compression, lecture fichier…). On bascule en manuel.
-      // On affiche la cause technique pour diagnostiquer le problème.
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[scan] erreur fatale :', err);
-      toast(`Échec du scan (${msg}). Saisie manuelle possible.`, 'error');
+      log(`ERREUR FATALE : ${msg}`);
+      setScanError(msg);
+      toast('Échec du scan — voir détails.', 'error');
       setSource('manual');
       setStep('review');
     }
@@ -216,6 +229,8 @@ export function AddPage() {
     setCategoryId('');
     setNote('');
     setSource('manual');
+    setScanLog([]);
+    setScanError(null);
   }
 
   return (
@@ -324,6 +339,25 @@ export function AddPage() {
                 alt="Ticket scanné"
                 className="max-h-48 w-full object-contain bg-slate-100 dark:bg-slate-800"
               />
+            </div>
+          )}
+
+          {/* Panneau de diagnostic (visible si scan partiel ou échec) */}
+          {(scanLog.length > 0 || scanError) && (
+            <div className="card max-h-40 overflow-y-auto p-3">
+              <p className="mb-1 text-xs font-semibold text-slate-500">
+                Diagnostic du scan
+              </p>
+              {scanLog.map((line, i) => (
+                <p key={i} className="font-mono text-xs text-slate-600 dark:text-slate-300">
+                  {line}
+                </p>
+              ))}
+              {scanError && (
+                <p className="mt-1 font-mono text-xs font-bold text-red-600">
+                  ⚠ {scanError}
+                </p>
+              )}
             </div>
           )}
 

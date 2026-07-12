@@ -132,10 +132,11 @@ export function SettingsPage() {
   async function shareApp() {
     const text =
       'Mes Dépenses — suivi de dépenses avec assistant IA (photo de tickets) 📸\n' +
-      'Gratuit, sans pub, hors-ligne. Installe-la sur ton téléphone :\n' +
+      '100% gratuit, sans pub, hors-ligne. Installe-la sur ton téléphone :\n' +
       'https://ericetje4-cloud.github.io/mes-depenses/\n\n' +
-      'Pour l\'assistant IA, crée une clé Gemini gratuite (2 min) :\n' +
-      'https://aistudio.google.com/apikey puis colle-la dans Réglages → Agent IA.';
+      'Pour activer l\'assistant IA (gratuit et illimité), il faut créer une clé Gemini\n' +
+      'gratuite en 2 minutes ici : https://aistudio.google.com/apikey\n' +
+      'Puis colle-la dans l\'app : Réglages → Agent IA.';
     const shareData = { title: 'Mes Dépenses', text, url: 'https://ericetje4-cloud.github.io/mes-depenses/' };
 
     // Tentative avec la Web Share API (mobile principalement).

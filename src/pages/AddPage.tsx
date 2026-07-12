@@ -360,23 +360,26 @@ export function AddPage() {
             </div>
           )}
 
-          {/* Panneau de diagnostic (visible si scan partiel ou échec) */}
+          {/* Panneau de diagnostic : masqué en cas de succès complet,
+              visible et repliable sinon (dépannage). */}
           {(scanLog.length > 0 || scanError) && (
-            <div className="card max-h-40 overflow-y-auto p-3">
-              <p className="mb-1 text-xs font-semibold text-slate-500">
+            <details className="card max-h-48 overflow-y-auto p-3">
+              <summary className="cursor-pointer text-xs font-semibold text-slate-500">
                 Diagnostic du scan
-              </p>
-              {scanLog.map((line, i) => (
-                <p key={i} className="font-mono text-xs text-slate-600 dark:text-slate-300">
-                  {line}
-                </p>
-              ))}
-              {scanError && (
-                <p className="mt-1 font-mono text-xs font-bold text-red-600">
-                  ⚠ {scanError}
-                </p>
-              )}
-            </div>
+              </summary>
+              <div className="mt-2">
+                {scanLog.map((line, i) => (
+                  <p key={i} className="font-mono text-xs text-slate-600 dark:text-slate-300">
+                    {line}
+                  </p>
+                ))}
+                {scanError && (
+                  <p className="mt-1 font-mono text-xs font-bold text-red-600">
+                    ⚠ {scanError}
+                  </p>
+                )}
+              </div>
+            </details>
           )}
 
           {/* Badge confiance OCR */}
